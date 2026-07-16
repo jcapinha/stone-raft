@@ -1,0 +1,10 @@
+---
+description: Read living project context before architecture suggestions; ask before light doc edits
+alwaysApply: true
+---
+
+# Project context
+
+Before suggesting architecture, stack, or scope changes, read `CONTEXT.md` and `REJECTED.md` at the repo root. Treat them as current truth. Never re-propose items listed in `REJECTED.md`.
+
+Outside an explicit `/grill-with-docs` session, if a real decision should be recorded: propose the exact edit to `CONTEXT.md` and/or `REJECTED.md`, and ask the user before writing.
