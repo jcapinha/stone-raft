@@ -60,3 +60,6 @@ The engine produces mono audio at 48 kHz (matching the Daisy codec). The mixer i
 
 **Flash and debug with a probe**
 Flash via the Daisy's USB DFU bootloader, and use a debug probe (ST-Link or similar) from the start for defmt logs and step debugging.
+
+**Lock-free control signals into the audio callback**
+The audio callback must never block or wait, since a stall causes audible clicks. Values other threads send into it (starting with the tone on/off flag, later MIDI note events, parameters) use lock-free primitives (`AtomicBool`/similar), never a `Mutex`.
