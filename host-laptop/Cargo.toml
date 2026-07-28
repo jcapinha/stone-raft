@@ -5,4 +5,7 @@ edition = "2024"
 
 [dependencies]
 cpal = "0.18.1"
+crossterm = "0.28"
 engine = { path = "../engine" }
+midir = "0.11"
+rtrb = "0.3"
