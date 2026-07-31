@@ -47,12 +47,18 @@ The engine is written in no_std style (fixed-size data, no heap, minimal depende
 The first engine is subtractive (oscillator to filter to ADSR amp). Wavetable is an explicitly wanted future engine. Multitimbral routing does not care what recipe each engine uses.
 
 **Multitimbral routing with per-engine volume**
-Incoming MIDI is routed by channel to a matching engine; engine outputs are summed into one mix. Each engine's volume (gain) is adjustable live via MIDI CC now, and physical knobs later.
+Incoming MIDI is routed by channel to a matching engine instance; engine outputs are summed into one mix. Each instance's volume (gain) is adjustable live via MIDI CC now, and physical knobs later. Longer term: configurable channel → instance mapping, including several instances of the same recipe with independent params (filter, ADSR, etc.). Not built yet.
 
 **Per-engine fixed polyphony**
-Each engine has its own fixed set of voices (around 4, tunable after measuring the Daisy) with voice stealing when notes exceed voices. A shared voice pool may come later if channels starve each other.
+Each engine has a fixed set of 4 voices (tunable after measuring the Daisy) with oldest-voice stealing when notes exceed voices. Velocity is stored on each voice but not used for loudness yet. Note number → Hz lives in the engine. Voices use a fixed low per-voice gain and are summed (no divide-by-voice-count). A shared voice pool may come later if channels starve each other.
 
-**Serial MIDI in**
+**Laptop MIDI and keyboard input**
+`host-laptop` opens the first midir input port and feeds note on/off into the engine. If no MIDI port exists, a crossterm one-octave laptop-keyboard fallback (from C4, fixed velocity) pushes the same events. This development slice listens on all MIDI channels with a single engine instance. Terminal key release is not available under WSL, so keyboard-fallback notes sound until voice stealing replaces them. Accepted for development.
+
+**WSL only for now**
+All development, tests, and play-tests happen in WSL. A Windows-native build of `host-laptop` would unlock real MIDI devices and keyboard hold-to-play, but it needs a full MinGW or MSVC toolchain and is deliberately not set up. Agents should not suggest PowerShell runs of `host-laptop` until that changes.
+
+**Serial MIDI in (Daisy)**
 MIDI reaches the Daisy over serial (DIN/TRS) from the Polyend via a MIDI thru box, through an optocoupler into a UART pin. USB MIDI is not used on the Daisy; it is fine on the laptop (via midir) for development against a software keyboard or the Polyend.
 
 **Mono, 48 kHz to start**
@@ -62,4 +68,4 @@ The engine produces mono audio at 48 kHz (matching the Daisy codec). The mixer i
 Flash via the Daisy's USB DFU bootloader, and use a debug probe (ST-Link or similar) from the start for defmt logs and step debugging.
 
 **Lock-free control signals into the audio callback**
-The audio callback must never block or wait, since a stall causes audible clicks. Values other threads send into it (starting with the tone on/off flag, later MIDI note events, parameters) use lock-free primitives (`AtomicBool`/similar), never a `Mutex`.
+The audio callback must never block or wait, since a stall causes audible clicks. Never use a `Mutex` on that path. Simple flags may use atomics; note on/off streams use a host-owned lock-free SPSC queue (`rtrb` on the laptop). Only the audio thread calls engine `note_on` / `note_off`.
