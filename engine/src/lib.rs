@@ -236,6 +236,29 @@ mod tests {
         assert!((hz - 261.63).abs() < 0.1, "expected ~261.63 Hz, got {hz}");
     }
 
+    /// How strongly `frequency_hz` appears in `samples` (normalized DFT bin magnitude).
+    /// Present sines at `VOICE_AMPLITUDE` score near half that amplitude; absent pitches score near 0.
+    fn tone_strength(samples: &[f32], frequency_hz: f32) -> f32 {
+        let mut re = 0.0f32;
+        let mut im = 0.0f32;
+        for (n, &sample) in samples.iter().enumerate() {
+            let phase = TAU * frequency_hz * (n as f32) / SAMPLE_RATE_HZ;
+            re += sample * phase.cos();
+            im += sample * phase.sin();
+        }
+        (re * re + im * im).sqrt() / samples.len() as f32
+    }
+
+    fn take_samples(engine: &mut Engine, count: usize) -> Vec<f32> {
+        (0..count).map(|_| engine.next_sample()).collect()
+    }
+
+    /// Below this, a pitch is treated as absent from the mix; above, as present.
+    /// Tuned for VOICE_AMPLITUDE and a few-thousand-sample window at 48 kHz.
+    const TONE_PRESENT: f32 = 0.04;
+    const TONE_ABSENT: f32 = 0.015;
+    const ANALYSIS_SAMPLES: usize = 4096;
+
     #[test]
     fn fifth_note_steals_oldest() {
         let mut engine = Engine::new(SAMPLE_RATE_HZ);
@@ -245,19 +268,19 @@ mod tests {
         engine.note_on(65, 100);
         engine.note_on(67, 100);
 
-        let active_notes: Vec<u8> = engine
-            .voices
-            .iter()
-            .filter(|v| v.active)
-            .map(|v| v.note)
-            .collect();
+        let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
 
-        assert_eq!(active_notes.len(), VOICE_COUNT);
-        assert!(!active_notes.contains(&60), "oldest note 60 should be stolen");
-        assert!(active_notes.contains(&67));
-        assert!(active_notes.contains(&62));
-        assert!(active_notes.contains(&64));
-        assert!(active_notes.contains(&65));
+        assert!(
+            tone_strength(&samples, midi_note_to_hz(60)) < TONE_ABSENT,
+            "oldest note 60 should be stolen"
+        );
+        for note in [62u8, 64, 65, 67] {
+            let strength = tone_strength(&samples, midi_note_to_hz(note));
+            assert!(
+                strength > TONE_PRESENT,
+                "expected note {note} still sounding, strength was {strength}"
+            );
+        }
     }
 
     #[test]
@@ -267,21 +290,38 @@ mod tests {
         engine.note_on(64, 100);
         engine.note_off(60);
 
-        let active: Vec<u8> = engine
-            .voices
-            .iter()
-            .filter(|v| v.active)
-            .map(|v| v.note)
-            .collect();
-        assert_eq!(active, vec![64]);
+        let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
+        let strength_60 = tone_strength(&samples, midi_note_to_hz(60));
+        let strength_64 = tone_strength(&samples, midi_note_to_hz(64));
+
+        assert!(
+            strength_60 < TONE_ABSENT,
+            "note 60 should be silent after note_off, strength was {strength_60}"
+        );
+        assert!(
+            strength_64 > TONE_PRESENT,
+            "note 64 should still sound, strength was {strength_64}"
+        );
     }
 
     #[test]
-    fn velocity_is_stored_unused_for_gain() {
-        let mut engine = Engine::new(SAMPLE_RATE_HZ);
-        engine.note_on(60, 77);
-        let voice = engine.voices.iter().find(|v| v.active).expect("voice on");
-        assert_eq!(voice.velocity, 77);
-        assert_eq!(voice.note, 60);
+    fn velocity_does_not_affect_gain() {
+        let mut quiet = Engine::new(SAMPLE_RATE_HZ);
+        let mut loud = Engine::new(SAMPLE_RATE_HZ);
+        quiet.note_on(60, 1);
+        loud.note_on(60, 127);
+
+        let mut peak_quiet = 0.0f32;
+        let mut peak_loud = 0.0f32;
+        for _ in 0..ANALYSIS_SAMPLES {
+            peak_quiet = peak_quiet.max(quiet.next_sample().abs());
+            peak_loud = peak_loud.max(loud.next_sample().abs());
+        }
+
+        let diff = (peak_loud - peak_quiet).abs();
+        assert!(
+            diff < 1e-5,
+            "velocity should not change loudness yet; peak quiet={peak_quiet}, loud={peak_loud}"
+        );
     }
 }
