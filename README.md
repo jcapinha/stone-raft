@@ -49,7 +49,23 @@ If MIDI cannot be opened (no ports, or no ALSA sequencer under WSL), use the lap
 
 Press `q` to quit (in keyboard mode, just `q`; with MIDI open, type `q` then Enter).
 
-Note release depends on the terminal. Most Unix terminals, including Windows Terminal running WSL, never report that a key came back up, so notes keep sounding until 4-voice stealing replaces them. The native Windows console does report key release, but the Windows build is not set up (see above).
+### Live engine params (terminal)
+
+While audio is running, change subtractive params with named line commands (no MIDI device required):
+
+| Command | Meaning |
+|---------|---------|
+| `cutoff <Hz>` | Filter cutoff, e.g. `cutoff 800` |
+| `res <0..1>` | Filter resonance, e.g. `res 0.3` |
+| `attack <ms>` | Amp envelope attack time |
+| `decay <ms>` | Amp envelope decay time |
+| `sustain <0..1>` | Amp envelope sustain level |
+| `release <ms>` | Amp envelope release time |
+| `wave saw` / `wave square` | Oscillator shape for all voices |
+
+In **keyboard mode**, press `/` to enter one command line, type the command, then Enter. In **MIDI mode** (line input already active), type the command on its own line, or `q` to quit.
+
+Note release depends on the terminal. Most Unix terminals, including Windows Terminal running WSL, never report that a key came back up, so notes rely on the amp release stage and 4-voice stealing rather than true key-up. The native Windows console does report key release, but the Windows build is not set up (see above).
 
 ## Running `engine`'s tests
 
