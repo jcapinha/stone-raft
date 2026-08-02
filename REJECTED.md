@@ -8,4 +8,5 @@ Closed doors. Do not re-propose these unless the author explicitly reopens them 
 - **FunDSP as an engine dependency** — rejected; it needs std and a heap and will not run on the Daisy. May be used only as a learning reference.
 - **USB MIDI on the Daisy** — not used; serial (DIN/TRS) MIDI chosen. USB MIDI remains fine on the laptop for development.
 - **Mutex for audio-callback control signals** — rejected in favor of atomics; the audio thread must never risk blocking on a lock.
-- **Windows-native host build via rustup's GNU toolchain** — attempted and abandoned. Rustup ships `dlltool.exe` but not the assembler it invokes, so the `windows-*` crates that `cpal` and `midir` depend on cannot build. Would require a full MinGW install or MSVC build tools. Reopen only if laptop MIDI becomes necessary before the Daisy port.
+- **Windows-native host via rustup's GNU/MinGW toolchain** — attempted and abandoned (`dlltool` without assembler). Stays closed. Use MSVC Build Tools for `host-windows` instead.
+- **WSL-only listening for laptop play-tests** — reversed. WSLg Pulse/`RDPSink` drops the cpal stream with ALSA `snd_pcm_avail_delay` I/O error (5) even when idle. Native `host-windows` on MSVC is the play path; `host-wsl` remains for WSL work.

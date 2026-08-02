@@ -1,3 +1,5 @@
+//! Shared laptop-host plumbing for `host-wsl` and `host-windows`.
+
 use std::collections::HashSet;
 use std::error::Error;
 use std::io::{self, BufRead, Write};
@@ -5,11 +7,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{FromSample, SizedSample};
+use cpal::{Device, FromSample, SizedSample};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use engine::{Engine, Waveform};
-use midir::{MidiInput, MidiInputConnection};
+use midir::{MidiInput, MidiInputConnection, MidiInputPort};
 use rtrb::{Producer, RingBuffer};
 
 const EVENT_QUEUE_CAPACITY: usize = 128;
@@ -30,11 +32,10 @@ enum ControlEvent {
     SetWave { waveform: Waveform },
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or("no default output device found")?;
+/// Opens audio and MIDI (or keyboard fallback) and runs until the user quits.
+pub fn run(midi_client_name: &str) -> Result<(), Box<dyn Error>> {
+    let cpal_host = cpal::default_host();
+    let device = select_output_device(&cpal_host)?;
     let supported_config = device.default_output_config()?;
 
     println!("Output device: {device}");
@@ -60,7 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     stream.play()?;
 
     // Keep the MIDI connection alive for the whole run when a port exists.
-    if let Some(_midi_connection) = try_open_first_midi_input(Arc::clone(&producer))? {
+    if let Some(_midi_connection) = try_open_midi_input(midi_client_name, Arc::clone(&producer))? {
         println!("Type engine commands (cutoff, res, attack, …) or q then Enter to quit.");
         print_param_help();
         run_line_command_loop(&producer)?;
@@ -73,6 +74,40 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn select_output_device(cpal_host: &cpal::Host) -> Result<Device, Box<dyn Error>> {
+    let devices: Vec<Device> = cpal_host.output_devices()?.collect();
+    if devices.is_empty() {
+        return Err("no output devices found".into());
+    }
+
+    if devices.len() == 1 {
+        return Ok(devices.into_iter().next().expect("len checked"));
+    }
+
+    println!("Audio output devices:");
+    for (index, device) in devices.iter().enumerate() {
+        // Device's Display uses the device name when available.
+        println!("  {index}: {device}");
+    }
+
+    let index = prompt_index("Select audio output number", devices.len())?;
+    Ok(devices.into_iter().nth(index).expect("index checked"))
+}
+
+fn prompt_index(prompt: &str, count: usize) -> Result<usize, Box<dyn Error>> {
+    loop {
+        print!("{prompt} (0-{}): ", count - 1);
+        io::stdout().flush()?;
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        let trimmed = line.trim();
+        match trimmed.parse::<usize>() {
+            Ok(index) if index < count => return Ok(index),
+            _ => println!("Enter a number between 0 and {}.", count - 1),
+        }
+    }
 }
 
 fn build_stream<T>(
@@ -130,12 +165,13 @@ fn push_event(producer: &Arc<Mutex<Producer<ControlEvent>>>, event: ControlEvent
     }
 }
 
-fn try_open_first_midi_input(
+fn try_open_midi_input(
+    client_name: &str,
     producer: Arc<Mutex<Producer<ControlEvent>>>,
 ) -> Result<Option<MidiInputConnection<()>>, Box<dyn Error>> {
     // On some setups (e.g. WSL without an ALSA sequencer) midir cannot initialize.
     // Treat that like "no ports" so the keyboard fallback still works.
-    let midi_in = match MidiInput::new("stone-raft host-laptop") {
+    let midi_in = match MidiInput::new(client_name) {
         Ok(midi_in) => midi_in,
         Err(err) => {
             eprintln!("MIDI unavailable ({err}); falling back to keyboard.");
@@ -147,12 +183,12 @@ fn try_open_first_midi_input(
         return Ok(None);
     }
 
-    let port = &ports[0];
-    let port_name = midi_in.port_name(port)?;
+    let port = select_midi_port(&midi_in, &ports)?;
+    let port_name = midi_in.port_name(&port)?;
     println!("MIDI input: {port_name}");
 
     match midi_in.connect(
-        port,
+        &port,
         "stone-raft-input",
         move |_stamp, message, _| {
             if let Some(event) = parse_midi_message(message) {
@@ -164,6 +200,26 @@ fn try_open_first_midi_input(
         Ok(connection) => Ok(Some(connection)),
         Err(err) => Err(format!("MIDI connect failed: {err}").into()),
     }
+}
+
+fn select_midi_port(
+    midi_in: &MidiInput,
+    ports: &[MidiInputPort],
+) -> Result<MidiInputPort, Box<dyn Error>> {
+    if ports.len() == 1 {
+        return Ok(ports[0].clone());
+    }
+
+    println!("MIDI input ports:");
+    for (index, port) in ports.iter().enumerate() {
+        let name = midi_in
+            .port_name(port)
+            .unwrap_or_else(|_| "<unknown>".to_string());
+        println!("  {index}: {name}");
+    }
+
+    let index = prompt_index("Select MIDI input number", ports.len())?;
+    Ok(ports[index].clone())
 }
 
 fn parse_midi_message(message: &[u8]) -> Option<ControlEvent> {

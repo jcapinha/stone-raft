@@ -14,40 +14,86 @@ To stress-test a plan and update those files as you decide, use `/grill-with-doc
 ## Workspace layout
 
 - [`engine/`](engine) — the sound-generation code (oscillators, filters, envelopes). Written `no_std` so the same code can run on the Daisy Seed later, with no operating system underneath.
-- [`host-laptop/`](host-laptop) — a thin adapter that connects `engine` to your laptop's speakers ([cpal](https://docs.rs/cpal)) and MIDI ([midir](https://docs.rs/midir)). Used for fast development before porting to the Daisy.
+- [`host-common/`](host-common) — shared laptop host plumbing (audio/MIDI wiring, param commands, keyboard fallback) used by both OS binaries.
+- [`host-wsl/`](host-wsl) — thin WSL/Linux binary for development and optional quick listening (WSLg audio can be flaky).
+- [`host-windows/`](host-windows) — thin native Windows binary for reliable play, MIDI devices, and keyboard hold-to-play (MSVC toolchain).
 
-## Running `host-laptop`
+## Running on WSL (`host-wsl`)
 
 You need a Rust toolchain (install via [rustup](https://rustup.rs)).
-
-### WSL / Linux
 
 `cpal`'s Linux backend needs ALSA's development files at build time:
 
 ```bash
 sudo apt update && sudo apt install -y pkg-config libasound2-dev
-cargo run -p host-laptop
+cargo run -p host-wsl
 ```
 
-On WSL, audio is routed to Windows through WSLg's PulseAudio bridge, so you should hear sound through your normal Windows speakers.
+On WSL, audio is routed to Windows through WSLg's PulseAudio bridge. That path can drop the stream (ALSA I/O errors). Prefer `host-windows` when you want to hear and play properly.
 
-### PowerShell (native Windows)
+WSL usually has no ALSA sequencer, so MIDI ports are often unavailable and the host falls back to the laptop keyboard.
 
-Not set up. Building `host-laptop` on Windows needs either a full MinGW installation (rustup's GNU toolchain ships `dlltool.exe` but not the assembler it calls, so the `windows-*` crates fail to build) or the MSVC toolchain with Visual Studio Build Tools. Neither is installed, so use WSL.
+## Running on Windows (`host-windows`)
 
-This is the only thing WSL cannot do: MIDI devices (WSL2 has no ALSA sequencer) and keyboard hold-to-play (see below).
+Use PowerShell (or Windows Terminal) with the **MSVC** Rust toolchain. The GNU/MinGW path is not supported.
+
+### One-time setup
+
+Rust in WSL does **not** count here. `host-windows` needs a separate Windows install of rustup (MSVC).
+
+1. Install Visual Studio Build Tools with the C++ workload:
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+2. Install rustup for Windows (opens the official installer):
+
+```powershell
+winget install Rustlang.Rustup
+```
+
+Close and reopen PowerShell after this so `rustup` and `cargo` are on `PATH`. When the rustup installer asks for a default host triple, keep **`x86_64-pc-windows-msvc`** (the default).
+
+3. Confirm the MSVC toolchain is the default:
+
+```powershell
+rustup default stable-x86_64-pc-windows-msvc
+rustup show
+```
+
+4. Open this repo from Windows. If the files live in WSL, list distros under `\\wsl$` in Explorer or PowerShell, then:
+
+```powershell
+cd \\wsl$\<Distro>\home\capinha\audio_experiments\stone-raft
+cargo run -p host-windows
+```
+
+Replace `<Distro>` with your WSL distro folder name (for example `Ubuntu`).
+
+Building over `\\wsl$\...` often fails incremental compilation with an “Incorrect function” lock-file error. Keep the source on WSL, but put the build output on a real Windows drive:
+
+```powershell
+$env:CARGO_TARGET_DIR = "$env:USERPROFILE\stone-raft-target"
+$env:CARGO_INCREMENTAL = "0"
+cargo run -p host-windows
+```
+
+Those two `$env:...` lines only last for that PowerShell window. Run them again in each new session before `cargo run`.
 
 ### Playing notes
 
-If a MIDI input port is available, the host connects to the **first** one and prints its name. Play notes from that device (all MIDI channels drive the single engine for now).
+If there is exactly one MIDI input port, the host connects to it automatically. If there are several, it lists them and asks for a number. Play notes from that device (all MIDI channels drive the single engine for now).
 
-If MIDI cannot be opened (no ports, or no ALSA sequencer under WSL), use the laptop keyboard (one octave from C4):
+If MIDI cannot be opened, use the laptop keyboard (one octave from C4):
 
 | Keys | Notes |
 |------|--------|
 | `A` `W` `S` `E` `D` `F` `T` `G` `Y` `H` `U` `J` `K` | C C# D D# E F F# G G# A A# B C |
 
 Press `q` to quit (in keyboard mode, just `q`; with MIDI open, type `q` then Enter).
+
+Audio outputs work the same way: one device is selected automatically; several devices means a numbered list to pick from.
 
 ### Live engine params (terminal)
 
@@ -63,9 +109,19 @@ While audio is running, change subtractive params with named line commands (no M
 | `release <ms>` | Amp envelope release time |
 | `wave saw` / `wave square` | Oscillator shape for all voices |
 
+Example (one command per line, or after `/` in keyboard mode):
+
+```text
+cutoff 1200
+res 0.4
+attack 5
+release 400
+wave square
+```
+
 In **keyboard mode**, press `/` to enter one command line, type the command, then Enter. In **MIDI mode** (line input already active), type the command on its own line, or `q` to quit.
 
-Note release depends on the terminal. Most Unix terminals, including Windows Terminal running WSL, never report that a key came back up, so notes rely on the amp release stage and 4-voice stealing rather than true key-up. The native Windows console does report key release, but the Windows build is not set up (see above).
+Note release depends on the terminal. Most Unix terminals, including Windows Terminal running WSL, never report that a key came back up, so notes rely on the amp release stage and 4-voice stealing rather than true key-up. The native Windows console (used by `host-windows`) does report key release, so hold-to-play works there.
 
 ## Running `engine`'s tests
 
