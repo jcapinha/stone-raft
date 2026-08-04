@@ -1,12 +1,22 @@
 #![cfg_attr(not(test), no_std)]
 
-use core::f32::consts::TAU;
+mod envelope;
+mod filter;
+mod oscillator;
+
+pub use envelope::{velocity_to_amp, Adsr, EnvelopeStage};
+pub use filter::Svf;
+pub use oscillator::{Oscillator, Waveform};
+
+use envelope::velocity_to_amp as vel_amp;
+use filter::Svf as VoiceFilter;
+use oscillator::{Oscillator as VoiceOsc, Waveform as VoiceWave};
 
 /// Fixed number of simultaneous voices per engine instance.
 pub const VOICE_COUNT: usize = 4;
 
-/// Conservative per-voice gain so a few summed sines stay near full scale.
-const VOICE_AMPLITUDE: f32 = 0.15;
+/// Conservative per-voice gain so a few bright voices stay near full scale.
+const VOICE_AMPLITUDE: f32 = 0.12;
 
 /// Converts a MIDI note number to frequency in Hz (A4 = 69 = 440 Hz).
 pub fn midi_note_to_hz(note: u8) -> f32 {
@@ -14,84 +24,135 @@ pub fn midi_note_to_hz(note: u8) -> f32 {
     440.0 * libm::powf(2.0, semitones_from_a4 / 12.0)
 }
 
-/// A single sine-wave generator.
-///
-/// `core` (the no_std subset of the standard library) has no trig functions,
-/// since `sin`/`cos` normally come from the platform's libm. `libm` is a pure
-/// Rust reimplementation used here so this code can run with no operating
-/// system underneath, as it will on the Daisy Seed.
-pub struct Oscillator {
-    /// Position within one cycle, kept in the range [0.0, 1.0).
-    phase: f32,
-    /// How far `phase` advances per sample, derived from frequency and sample rate.
-    phase_increment: f32,
-}
-
-impl Oscillator {
-    pub fn new(sample_rate_hz: f32, frequency_hz: f32) -> Self {
-        let mut osc = Self {
-            phase: 0.0,
-            phase_increment: 0.0,
-        };
-        osc.set_frequency(sample_rate_hz, frequency_hz);
-        osc
-    }
-
-    pub fn set_frequency(&mut self, sample_rate_hz: f32, frequency_hz: f32) {
-        self.phase_increment = frequency_hz / sample_rate_hz;
-    }
-
-    /// Advances the oscillator by one sample and returns its value in [-1.0, 1.0].
-    pub fn next_sample(&mut self) -> f32 {
-        let sample = libm::sinf(self.phase * TAU);
-        self.phase += self.phase_increment;
-        if self.phase >= 1.0 {
-            self.phase -= 1.0;
-        }
-        sample
-    }
-}
-
 struct Voice {
-    oscillator: Oscillator,
-    active: bool,
+    oscillator: VoiceOsc,
+    filter: VoiceFilter,
+    amp: Adsr,
     note: u8,
-    /// Stored for later dynamics; not applied to gain yet.
-    velocity: u8,
-    /// Monotonic age stamp; higher means more recently started (used for steal-oldest).
+    velocity_amp: f32,
+    /// Monotonic age stamp; higher means more recently started (used for steal).
     age: u32,
 }
 
 impl Voice {
-    fn new(sample_rate_hz: f32) -> Self {
+    fn new(sample_rate_hz: f32, waveform: VoiceWave) -> Self {
         Self {
-            oscillator: Oscillator::new(sample_rate_hz, 440.0),
-            active: false,
+            oscillator: VoiceOsc::new(sample_rate_hz, 440.0, waveform),
+            filter: VoiceFilter::new(),
+            amp: Adsr::new(sample_rate_hz),
             note: 0,
-            velocity: 0,
+            velocity_amp: 1.0,
             age: 0,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.amp.is_active()
+    }
+
+    fn is_releasing(&self) -> bool {
+        self.amp.is_releasing()
+    }
+}
+
+/// Shared subtractive params for one engine instance.
+pub struct EngineParams {
+    pub waveform: Waveform,
+    pub cutoff_hz: f32,
+    pub resonance: f32,
+    pub attack_ms: f32,
+    pub decay_ms: f32,
+    pub sustain: f32,
+    pub release_ms: f32,
+}
+
+impl Default for EngineParams {
+    fn default() -> Self {
+        Self {
+            waveform: Waveform::Saw,
+            cutoff_hz: 2_000.0,
+            resonance: 0.2,
+            attack_ms: 10.0,
+            decay_ms: 100.0,
+            sustain: 0.7,
+            release_ms: 200.0,
         }
     }
 }
 
-/// One engine instance: a fixed pool of voices that turn MIDI notes into mono audio.
+/// One engine instance: fixed voices that turn MIDI notes into mono audio.
 pub struct Engine {
     sample_rate_hz: f32,
     voices: [Voice; VOICE_COUNT],
     next_age: u32,
+    params: EngineParams,
 }
 
 impl Engine {
     pub fn new(sample_rate_hz: f32) -> Self {
-        Self {
+        let params = EngineParams::default();
+        let mut engine = Self {
             sample_rate_hz,
             voices: [
-                Voice::new(sample_rate_hz),
-                Voice::new(sample_rate_hz),
-                Voice::new(sample_rate_hz),
-                Voice::new(sample_rate_hz),
+                Voice::new(sample_rate_hz, params.waveform),
+                Voice::new(sample_rate_hz, params.waveform),
+                Voice::new(sample_rate_hz, params.waveform),
+                Voice::new(sample_rate_hz, params.waveform),
             ],
             next_age: 1,
+            params,
+        };
+        engine.apply_envelope_params_to_all();
+        engine
+    }
+
+    pub fn params(&self) -> &EngineParams {
+        &self.params
+    }
+
+    pub fn set_waveform(&mut self, waveform: Waveform) {
+        self.params.waveform = waveform;
+        for voice in self.voices.iter_mut() {
+            voice.oscillator.set_waveform(waveform);
+        }
+    }
+
+    pub fn set_cutoff_hz(&mut self, cutoff_hz: f32) {
+        self.params.cutoff_hz = cutoff_hz.max(20.0);
+    }
+
+    pub fn set_resonance(&mut self, resonance: f32) {
+        self.params.resonance = resonance.clamp(0.0, 1.0);
+    }
+
+    pub fn set_attack_ms(&mut self, attack_ms: f32) {
+        self.params.attack_ms = attack_ms.max(0.0);
+        self.apply_envelope_params_to_all();
+    }
+
+    pub fn set_decay_ms(&mut self, decay_ms: f32) {
+        self.params.decay_ms = decay_ms.max(0.0);
+        self.apply_envelope_params_to_all();
+    }
+
+    pub fn set_sustain(&mut self, sustain: f32) {
+        self.params.sustain = sustain.clamp(0.0, 1.0);
+        self.apply_envelope_params_to_all();
+    }
+
+    pub fn set_release_ms(&mut self, release_ms: f32) {
+        self.params.release_ms = release_ms.max(0.0);
+        self.apply_envelope_params_to_all();
+    }
+
+    fn apply_envelope_params_to_all(&mut self) {
+        let attack = self.params.attack_ms;
+        let decay = self.params.decay_ms;
+        let release = self.params.release_ms;
+        let sustain = self.params.sustain;
+        for voice in self.voices.iter_mut() {
+            voice.amp.set_times_ms(attack, decay, release);
+            voice.amp.set_sustain(sustain);
         }
     }
 
@@ -107,71 +168,88 @@ impl Engine {
         if let Some(index) = self
             .voices
             .iter()
-            .position(|v| v.active && v.note == note)
+            .position(|v| v.is_active() && v.note == note)
         {
-            start_voice(
-                &mut self.voices[index],
-                self.sample_rate_hz,
-                note,
-                velocity,
-                age,
-            );
+            self.start_voice(index, note, velocity, age);
             return;
         }
 
-        if let Some(index) = self.voices.iter().position(|v| !v.active) {
-            start_voice(
-                &mut self.voices[index],
-                self.sample_rate_hz,
-                note,
-                velocity,
-                age,
-            );
+        if let Some(index) = self.voices.iter().position(|v| !v.is_active()) {
+            self.start_voice(index, note, velocity, age);
             return;
         }
 
-        let oldest_index = self
-            .voices
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, v)| v.age)
-            .map(|(i, _)| i)
-            .expect("VOICE_COUNT is non-zero");
-        start_voice(
-            &mut self.voices[oldest_index],
-            self.sample_rate_hz,
-            note,
-            velocity,
-            age,
-        );
+        let index = self.steal_index();
+        self.start_voice(index, note, velocity, age);
     }
 
     pub fn note_off(&mut self, note: u8) {
         for voice in self.voices.iter_mut() {
-            if voice.active && voice.note == note {
-                voice.active = false;
+            if voice.is_active() && voice.note == note {
+                voice.amp.note_off();
             }
         }
+    }
+
+    fn steal_index(&self) -> usize {
+        // Prefer oldest voice already in release; otherwise oldest overall.
+        let releasing = self
+            .voices
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.is_releasing())
+            .min_by_key(|(_, v)| v.age)
+            .map(|(i, _)| i);
+
+        if let Some(index) = releasing {
+            return index;
+        }
+
+        self.voices
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, v)| v.age)
+            .map(|(i, _)| i)
+            .expect("VOICE_COUNT is non-zero")
+    }
+
+    fn start_voice(&mut self, index: usize, note: u8, velocity: u8, age: u32) {
+        let sample_rate = self.sample_rate_hz;
+        let waveform = self.params.waveform;
+        let attack = self.params.attack_ms;
+        let decay = self.params.decay_ms;
+        let release = self.params.release_ms;
+        let sustain = self.params.sustain;
+
+        let voice = &mut self.voices[index];
+        voice.oscillator = VoiceOsc::new(sample_rate, midi_note_to_hz(note), waveform);
+        voice.filter.reset();
+        voice.amp.set_times_ms(attack, decay, release);
+        voice.amp.set_sustain(sustain);
+        voice.amp.note_on();
+        voice.note = note;
+        voice.velocity_amp = vel_amp(velocity);
+        voice.age = age;
     }
 
     /// Sums active voices into one mono sample in roughly [-1.0, 1.0].
     pub fn next_sample(&mut self) -> f32 {
+        let sample_rate = self.sample_rate_hz;
+        let cutoff = self.params.cutoff_hz;
+        let resonance = self.params.resonance;
+
         let mut mix = 0.0;
         for voice in self.voices.iter_mut() {
-            if voice.active {
-                mix += voice.oscillator.next_sample() * VOICE_AMPLITUDE;
+            if !voice.is_active() {
+                continue;
             }
+            let osc = voice.oscillator.next_sample();
+            let filtered = voice.filter.process(osc, sample_rate, cutoff, resonance);
+            let amp = voice.amp.next_level();
+            mix += filtered * amp * voice.velocity_amp * VOICE_AMPLITUDE;
         }
         mix
     }
-}
-
-fn start_voice(voice: &mut Voice, sample_rate_hz: f32, note: u8, velocity: u8, age: u32) {
-    voice.oscillator = Oscillator::new(sample_rate_hz, midi_note_to_hz(note));
-    voice.active = true;
-    voice.note = note;
-    voice.velocity = velocity;
-    voice.age = age;
 }
 
 #[cfg(test)]
@@ -179,49 +257,28 @@ mod tests {
     use super::*;
 
     const SAMPLE_RATE_HZ: f32 = 48_000.0;
-    // Chosen so the period is a round number of samples, which keeps the math in these tests simple.
-    const FREQUENCY_HZ: f32 = 480.0;
-    const SAMPLES_PER_PERIOD: usize = (SAMPLE_RATE_HZ / FREQUENCY_HZ) as usize;
+    const ANALYSIS_SAMPLES: usize = 4096;
+    const TONE_PRESENT: f32 = 0.02;
+    const TONE_ABSENT: f32 = 0.01;
 
-    #[test]
-    fn stays_within_unit_range() {
-        let mut osc = Oscillator::new(SAMPLE_RATE_HZ, FREQUENCY_HZ);
-        for _ in 0..10_000 {
-            let sample = osc.next_sample();
-            assert!(
-                (-1.0..=1.0).contains(&sample),
-                "sample {sample} escaped [-1.0, 1.0]"
-            );
-        }
+    fn take_samples(engine: &mut Engine, count: usize) -> Vec<f32> {
+        (0..count).map(|_| engine.next_sample()).collect()
     }
 
-    #[test]
-    fn repeats_after_one_period() {
-        let mut osc = Oscillator::new(SAMPLE_RATE_HZ, FREQUENCY_HZ);
-        let first = osc.next_sample();
-        for _ in 1..SAMPLES_PER_PERIOD {
-            osc.next_sample();
+    /// How strongly `frequency_hz` appears in `samples` (normalized DFT bin magnitude).
+    fn tone_strength(samples: &[f32], frequency_hz: f32) -> f32 {
+        let mut re = 0.0f32;
+        let mut im = 0.0f32;
+        for (n, &sample) in samples.iter().enumerate() {
+            let phase = core::f32::consts::TAU * frequency_hz * (n as f32) / SAMPLE_RATE_HZ;
+            re += sample * libm::cosf(phase);
+            im += sample * libm::sinf(phase);
         }
-        let after_one_period = osc.next_sample();
-
-        let diff = (after_one_period - first).abs();
-        assert!(
-            diff < 0.01,
-            "expected the wave to repeat after one period, diff was {diff}"
-        );
+        (re * re + im * im).sqrt() / samples.len() as f32
     }
 
-    #[test]
-    fn reaches_peak_a_quarter_period_in() {
-        let mut osc = Oscillator::new(SAMPLE_RATE_HZ, FREQUENCY_HZ);
-        let mut sample = 0.0;
-        for _ in 0..(SAMPLES_PER_PERIOD / 4) {
-            sample = osc.next_sample();
-        }
-        assert!(
-            sample > 0.95,
-            "expected close to the peak (1.0) a quarter period in, got {sample}"
-        );
+    fn peak_abs(samples: &[f32]) -> f32 {
+        samples.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()))
     }
 
     #[test]
@@ -236,43 +293,136 @@ mod tests {
         assert!((hz - 261.63).abs() < 0.1, "expected ~261.63 Hz, got {hz}");
     }
 
-    /// How strongly `frequency_hz` appears in `samples` (normalized DFT bin magnitude).
-    /// Present sines at `VOICE_AMPLITUDE` score near half that amplitude; absent pitches score near 0.
-    fn tone_strength(samples: &[f32], frequency_hz: f32) -> f32 {
-        let mut re = 0.0f32;
-        let mut im = 0.0f32;
-        for (n, &sample) in samples.iter().enumerate() {
-            let phase = TAU * frequency_hz * (n as f32) / SAMPLE_RATE_HZ;
-            re += sample * phase.cos();
-            im += sample * phase.sin();
-        }
-        (re * re + im * im).sqrt() / samples.len() as f32
+    #[test]
+    fn velocity_curve_is_square_of_linear() {
+        let linear_64 = 64.0 / 127.0;
+        let curved = velocity_to_amp(64);
+        assert!(
+            (curved - linear_64 * linear_64).abs() < 1e-5,
+            "expected square curve, got {curved}"
+        );
+        assert!(velocity_to_amp(127) > velocity_to_amp(64));
+        assert!(velocity_to_amp(64) > velocity_to_amp(32));
+        // Soft velocities drop more than linear: at 64, curve < linear.
+        assert!(curved < linear_64);
     }
-
-    fn take_samples(engine: &mut Engine, count: usize) -> Vec<f32> {
-        (0..count).map(|_| engine.next_sample()).collect()
-    }
-
-    /// Below this, a pitch is treated as absent from the mix; above, as present.
-    /// Tuned for VOICE_AMPLITUDE and a few-thousand-sample window at 48 kHz.
-    const TONE_PRESENT: f32 = 0.04;
-    const TONE_ABSENT: f32 = 0.015;
-    const ANALYSIS_SAMPLES: usize = 4096;
 
     #[test]
-    fn fifth_note_steals_oldest() {
+    fn oscillator_stays_within_unit_range() {
+        let mut osc = Oscillator::new(SAMPLE_RATE_HZ, 440.0, Waveform::Saw);
+        for _ in 0..10_000 {
+            let sample = osc.next_sample();
+            assert!(
+                (-1.5..=1.5).contains(&sample),
+                "sample {sample} escaped a safe range"
+            );
+        }
+        osc.set_waveform(Waveform::Square);
+        for _ in 0..10_000 {
+            let sample = osc.next_sample();
+            assert!(
+                (-1.5..=1.5).contains(&sample),
+                "sample {sample} escaped a safe range"
+            );
+        }
+    }
+
+    #[test]
+    fn higher_cutoff_passes_more_high_harmonic_energy() {
+        // Square wave at 220 Hz; measure energy near the 5th harmonic (~1100 Hz).
+        let mut dark = Engine::new(SAMPLE_RATE_HZ);
+        let mut bright = Engine::new(SAMPLE_RATE_HZ);
+        dark.set_waveform(Waveform::Square);
+        bright.set_waveform(Waveform::Square);
+        dark.set_cutoff_hz(400.0);
+        bright.set_cutoff_hz(8_000.0);
+        dark.set_resonance(0.0);
+        bright.set_resonance(0.0);
+        // Fast amp so analysis is mostly sustain.
+        dark.set_attack_ms(1.0);
+        bright.set_attack_ms(1.0);
+        dark.set_decay_ms(1.0);
+        bright.set_decay_ms(1.0);
+        dark.set_sustain(1.0);
+        bright.set_sustain(1.0);
+
+        dark.note_on(57, 127); // A3 ≈ 220 Hz
+        bright.note_on(57, 127);
+        // Skip attack
+        for _ in 0..2_000 {
+            dark.next_sample();
+            bright.next_sample();
+        }
+        let dark_samples = take_samples(&mut dark, ANALYSIS_SAMPLES);
+        let bright_samples = take_samples(&mut bright, ANALYSIS_SAMPLES);
+        let harmonic_hz = midi_note_to_hz(57) * 5.0;
+        let dark_h = tone_strength(&dark_samples, harmonic_hz);
+        let bright_h = tone_strength(&bright_samples, harmonic_hz);
+        assert!(
+            bright_h > dark_h * 1.5,
+            "expected open cutoff to pass more 5th harmonic; dark={dark_h} bright={bright_h}"
+        );
+    }
+
+    #[test]
+    fn note_off_fades_instead_of_hard_cut() {
         let mut engine = Engine::new(SAMPLE_RATE_HZ);
-        engine.note_on(60, 100);
-        engine.note_on(62, 100);
-        engine.note_on(64, 100);
-        engine.note_on(65, 100);
-        engine.note_on(67, 100);
+        engine.set_attack_ms(1.0);
+        engine.set_decay_ms(1.0);
+        engine.set_sustain(1.0);
+        engine.set_release_ms(50.0);
+        engine.note_on(60, 127);
+        for _ in 0..2_000 {
+            engine.next_sample();
+        }
+        engine.note_off(60);
+
+        let mut first_release_peak = 0.0f32;
+        for _ in 0..100 {
+            first_release_peak = first_release_peak.max(engine.next_sample().abs());
+        }
+        assert!(
+            first_release_peak > 0.01,
+            "should still be audible early in release, peak={first_release_peak}"
+        );
+
+        // Wait out release
+        for _ in 0..20_000 {
+            engine.next_sample();
+        }
+        let mut late_peak = 0.0f32;
+        for _ in 0..1_000 {
+            late_peak = late_peak.max(engine.next_sample().abs());
+        }
+        assert!(
+            late_peak < 1e-3,
+            "expected silence after release, peak={late_peak}"
+        );
+    }
+
+    #[test]
+    fn fifth_note_prefers_stealing_releasing_voice() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        engine.set_attack_ms(1.0);
+        engine.set_decay_ms(1.0);
+        engine.set_sustain(1.0);
+        engine.set_release_ms(500.0);
+
+        engine.note_on(60, 127);
+        engine.note_on(62, 127);
+        engine.note_on(64, 127);
+        engine.note_on(65, 127);
+        // Put the oldest note into release so it should be stolen first.
+        engine.note_off(60);
+        for _ in 0..100 {
+            engine.next_sample();
+        }
+        engine.note_on(67, 127);
 
         let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
-
         assert!(
             tone_strength(&samples, midi_note_to_hz(60)) < TONE_ABSENT,
-            "oldest note 60 should be stolen"
+            "releasing note 60 should be stolen"
         );
         for note in [62u8, 64, 65, 67] {
             let strength = tone_strength(&samples, midi_note_to_hz(note));
@@ -284,44 +434,68 @@ mod tests {
     }
 
     #[test]
-    fn note_off_silences_matching_voice() {
-        let mut engine = Engine::new(SAMPLE_RATE_HZ);
-        engine.note_on(60, 100);
-        engine.note_on(64, 100);
-        engine.note_off(60);
+    fn velocity_affects_loudness_with_curve() {
+        let mut quiet = Engine::new(SAMPLE_RATE_HZ);
+        let mut loud = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut quiet, &mut loud] {
+            engine.set_attack_ms(1.0);
+            engine.set_decay_ms(1.0);
+            engine.set_sustain(1.0);
+            engine.set_cutoff_hz(8_000.0);
+        }
+        quiet.note_on(60, 40);
+        loud.note_on(60, 127);
 
-        let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
-        let strength_60 = tone_strength(&samples, midi_note_to_hz(60));
-        let strength_64 = tone_strength(&samples, midi_note_to_hz(64));
-
+        for _ in 0..2_000 {
+            quiet.next_sample();
+            loud.next_sample();
+        }
+        let quiet_samples = take_samples(&mut quiet, ANALYSIS_SAMPLES);
+        let loud_samples = take_samples(&mut loud, ANALYSIS_SAMPLES);
+        let peak_quiet = peak_abs(&quiet_samples);
+        let peak_loud = peak_abs(&loud_samples);
         assert!(
-            strength_60 < TONE_ABSENT,
-            "note 60 should be silent after note_off, strength was {strength_60}"
+            peak_loud > peak_quiet * 2.0,
+            "loud should be much louder with square velocity curve; quiet={peak_quiet} loud={peak_loud}"
         );
+
+        // Ratio should track velocity_amp ratio, not linear velocity ratio.
+        let expected_ratio = velocity_to_amp(127) / velocity_to_amp(40);
+        let measured_ratio = peak_loud / peak_quiet;
         assert!(
-            strength_64 > TONE_PRESENT,
-            "note 64 should still sound, strength was {strength_64}"
+            (measured_ratio - expected_ratio).abs() / expected_ratio < 0.25,
+            "peak ratio {measured_ratio} should be near amp ratio {expected_ratio}"
         );
     }
 
     #[test]
-    fn velocity_does_not_affect_gain() {
-        let mut quiet = Engine::new(SAMPLE_RATE_HZ);
-        let mut loud = Engine::new(SAMPLE_RATE_HZ);
-        quiet.note_on(60, 1);
-        loud.note_on(60, 127);
-
-        let mut peak_quiet = 0.0f32;
-        let mut peak_loud = 0.0f32;
-        for _ in 0..ANALYSIS_SAMPLES {
-            peak_quiet = peak_quiet.max(quiet.next_sample().abs());
-            peak_loud = peak_loud.max(loud.next_sample().abs());
+    fn waveform_switch_changes_timbre_energy() {
+        let mut saw = Engine::new(SAMPLE_RATE_HZ);
+        let mut square = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut saw, &mut square] {
+            engine.set_attack_ms(1.0);
+            engine.set_decay_ms(1.0);
+            engine.set_sustain(1.0);
+            engine.set_cutoff_hz(10_000.0);
+            engine.set_resonance(0.0);
         }
-
-        let diff = (peak_loud - peak_quiet).abs();
+        saw.set_waveform(Waveform::Saw);
+        square.set_waveform(Waveform::Square);
+        saw.note_on(48, 127);
+        square.note_on(48, 127);
+        for _ in 0..2_000 {
+            saw.next_sample();
+            square.next_sample();
+        }
+        let saw_samples = take_samples(&mut saw, ANALYSIS_SAMPLES);
+        let square_samples = take_samples(&mut square, ANALYSIS_SAMPLES);
+        // Square has stronger odd harmonics; compare 3rd harmonic.
+        let h3 = midi_note_to_hz(48) * 3.0;
+        let saw_h3 = tone_strength(&saw_samples, h3);
+        let square_h3 = tone_strength(&square_samples, h3);
         assert!(
-            diff < 1e-5,
-            "velocity should not change loudness yet; peak quiet={peak_quiet}, loud={peak_loud}"
+            square_h3 > saw_h3,
+            "square should have stronger 3rd harmonic than saw; saw={saw_h3} square={square_h3}"
         );
     }
 }
