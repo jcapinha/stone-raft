@@ -122,6 +122,7 @@ While audio is running, change subtractive params with named line commands (no M
 | `envcopy` | Copy amp times onto the filter and assignable envelopes |
 | `envlink on` / `envlink off` | When on, amp time commands also write the other two envelopes |
 | `envvel <0..1>` | Shared velocity scaling for extra envelope amounts |
+| `random` | Fill every subtractive param with bounded random values and print the patch |
 
 Example (one command per line, or after `/` in keyboard mode):
 
@@ -131,6 +132,7 @@ res 0.4
 attack 5
 release 400
 wave square
+random
 ```
 
 In **keyboard mode**, press `/` to enter one command line, type the command, then Enter. In **MIDI mode** (line input already active), type the command on its own line, or `q` to quit.

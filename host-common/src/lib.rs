@@ -12,12 +12,31 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use engine::{Engine, Env3Dest, EnvelopeId, Waveform};
 use midir::{MidiInput, MidiInputConnection, MidiInputPort};
+use rand::Rng;
 use rtrb::{Producer, RingBuffer};
 
 const EVENT_QUEUE_CAPACITY: usize = 128;
 const KEYBOARD_VELOCITY: u8 = 100;
 /// MIDI note for C4; letter-key map builds one octave up from here.
 const KEYBOARD_ROOT_NOTE: u8 = 60;
+
+const RANDOM_CUTOFF_MIN_HZ: f32 = 80.0;
+const RANDOM_CUTOFF_MAX_HZ: f32 = 12_000.0;
+const RANDOM_RES_MAX: f32 = 0.9;
+const RANDOM_TIME_MIN_MS: f32 = 1.0;
+const RANDOM_TIME_MAX_MS: f32 = 2_000.0;
+const RANDOM_AMT_MIN: f32 = -4.0;
+const RANDOM_AMT_MAX: f32 = 4.0;
+const RANDOM_RES_AMT_MIN: f32 = -1.0;
+const RANDOM_RES_AMT_MAX: f32 = 1.0;
+
+const RANDOM_WAVEFORMS: [Waveform; 2] = [Waveform::Saw, Waveform::Square];
+const RANDOM_ENV3_DESTS: [Env3Dest; 4] = [
+    Env3Dest::Off,
+    Env3Dest::Resonance,
+    Env3Dest::Pitch,
+    Env3Dest::Cutoff,
+];
 
 #[derive(Debug, Clone, Copy)]
 enum ControlEvent {
@@ -44,6 +63,19 @@ enum ControlEvent {
     EnvCopy,
     SetEnvLink { on: bool },
     SetEnvVel { amount: f32 },
+}
+
+struct ParamCommand {
+    events: Vec<ControlEvent>,
+    report: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct RandomAdsr {
+    attack_ms: f32,
+    decay_ms: f32,
+    sustain: f32,
+    release_ms: f32,
 }
 
 /// Opens audio and MIDI (or keyboard fallback) and runs until the user quits.
@@ -307,6 +339,7 @@ fn print_param_help() {
     println!("  env3dest off|res|pitch|cutoff   env3amt <signed>");
     println!("  env3attack/decay/release <ms>   env3sustain <0..1>");
     println!("  envcopy   envlink on|off   envvel <0..1>");
+    println!("  random    (fill all params; prints the patch)");
 }
 
 fn key_to_note(code: KeyCode) -> Option<u8> {
@@ -329,9 +362,7 @@ fn key_to_note(code: KeyCode) -> Option<u8> {
     Some(KEYBOARD_ROOT_NOTE + offset)
 }
 
-fn run_keyboard_loop(
-    producer: &Arc<Mutex<Producer<ControlEvent>>>,
-) -> Result<(), Box<dyn Error>> {
+fn run_keyboard_loop(producer: &Arc<Mutex<Producer<ControlEvent>>>) -> Result<(), Box<dyn Error>> {
     enable_raw_mode()?;
     let result = keyboard_event_loop(producer);
     disable_raw_mode()?;
@@ -365,14 +396,7 @@ fn keyboard_event_loop(
                     io::stdout().flush()?;
                     let mut line = String::new();
                     io::stdin().read_line(&mut line)?;
-                    match parse_param_command(line.trim()) {
-                        Ok(Some(event)) => {
-                            push_event(producer, event);
-                            println!("ok");
-                        }
-                        Ok(None) => println!("(empty command)"),
-                        Err(err) => println!("error: {err}"),
-                    }
+                    dispatch_param_line(producer, line.trim(), Some("(empty command)"));
                     enable_raw_mode()?;
                 }
                 Event::Key(KeyEvent {
@@ -421,16 +445,195 @@ fn run_line_command_loop(
         if trimmed.eq_ignore_ascii_case("q") {
             break;
         }
-        match parse_param_command(trimmed) {
-            Ok(Some(event)) => {
-                push_event(producer, event);
-                println!("ok");
-            }
-            Ok(None) => {}
-            Err(err) => println!("error: {err}"),
-        }
+        dispatch_param_line(producer, trimmed, None);
     }
     Ok(())
+}
+
+fn dispatch_param_line(
+    producer: &Arc<Mutex<Producer<ControlEvent>>>,
+    line: &str,
+    empty_message: Option<&str>,
+) {
+    match parse_line_commands(line) {
+        Ok(Some(command)) => {
+            for event in command.events {
+                push_event(producer, event);
+            }
+            println!("ok");
+            if let Some(report) = command.report {
+                print!("{report}");
+            }
+        }
+        Ok(None) => {
+            if let Some(message) = empty_message {
+                println!("{message}");
+            }
+        }
+        Err(err) => println!("error: {err}"),
+    }
+}
+
+fn parse_line_commands(line: &str) -> Result<Option<ParamCommand>, String> {
+    if line.is_empty() {
+        return Ok(None);
+    }
+
+    let mut parts = line.split_whitespace();
+    let cmd = parts
+        .next()
+        .ok_or_else(|| "expected a command".to_string())?
+        .to_ascii_lowercase();
+    if cmd == "random" {
+        if parts.next().is_some() {
+            return Err("too many arguments".to_string());
+        }
+        return Ok(Some(generate_random_patch(&mut rand::thread_rng())));
+    }
+
+    Ok(parse_param_command(line)?.map(|event| ParamCommand {
+        events: vec![event],
+        report: None,
+    }))
+}
+
+fn log_uniform<R: Rng>(rng: &mut R, min: f32, max: f32) -> f32 {
+    let log_min = min.ln();
+    let log_max = max.ln();
+    rng.gen_range(log_min..=log_max).exp().clamp(min, max)
+}
+
+fn random_adsr<R: Rng>(rng: &mut R) -> RandomAdsr {
+    RandomAdsr {
+        attack_ms: log_uniform(rng, RANDOM_TIME_MIN_MS, RANDOM_TIME_MAX_MS),
+        decay_ms: log_uniform(rng, RANDOM_TIME_MIN_MS, RANDOM_TIME_MAX_MS),
+        sustain: rng.gen_range(0.0..=1.0),
+        release_ms: log_uniform(rng, RANDOM_TIME_MIN_MS, RANDOM_TIME_MAX_MS),
+    }
+}
+
+fn wave_name(waveform: Waveform) -> &'static str {
+    match waveform {
+        Waveform::Saw => "saw",
+        Waveform::Square => "square",
+    }
+}
+
+fn env3_dest_name(dest: Env3Dest) -> &'static str {
+    match dest {
+        Env3Dest::Off => "off",
+        Env3Dest::Resonance => "res",
+        Env3Dest::Pitch => "pitch",
+        Env3Dest::Cutoff => "cutoff",
+    }
+}
+
+fn generate_random_patch<R: Rng>(rng: &mut R) -> ParamCommand {
+    let waveform = RANDOM_WAVEFORMS[rng.gen_range(0..RANDOM_WAVEFORMS.len())];
+    let cutoff_hz = log_uniform(rng, RANDOM_CUTOFF_MIN_HZ, RANDOM_CUTOFF_MAX_HZ);
+    let resonance = rng.gen_range(0.0..=RANDOM_RES_MAX);
+    let amp = random_adsr(rng);
+    let env_link = rng.gen_bool(0.5);
+    let filter_env = if env_link { amp } else { random_adsr(rng) };
+    let assign_env = if env_link { amp } else { random_adsr(rng) };
+    let filtenv_amt = rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX);
+    let env3_dest = RANDOM_ENV3_DESTS[rng.gen_range(0..RANDOM_ENV3_DESTS.len())];
+    let env3_amt = match env3_dest {
+        Env3Dest::Resonance => rng.gen_range(RANDOM_RES_AMT_MIN..=RANDOM_RES_AMT_MAX),
+        Env3Dest::Off | Env3Dest::Pitch | Env3Dest::Cutoff => {
+            rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX)
+        }
+    };
+    let envvel = rng.gen_range(0.0..=1.0);
+    let link_name = if env_link { "on" } else { "off" };
+
+    let report = format!(
+        "wave {}\n\
+         cutoff {cutoff_hz:.0}\n\
+         res {resonance:.2}\n\
+         attack {:.0}\n\
+         decay {:.0}\n\
+         sustain {:.2}\n\
+         release {:.0}\n\
+         filtenvamt {filtenv_amt:.2}\n\
+         filtenvattack {:.0}\n\
+         filtenvdecay {:.0}\n\
+         filtenvsustain {:.2}\n\
+         filtenvrelease {:.0}\n\
+         env3dest {}\n\
+         env3amt {env3_amt:.2}\n\
+         env3attack {:.0}\n\
+         env3decay {:.0}\n\
+         env3sustain {:.2}\n\
+         env3release {:.0}\n\
+         envvel {envvel:.2}\n\
+         envlink {link_name}\n",
+        wave_name(waveform),
+        amp.attack_ms,
+        amp.decay_ms,
+        amp.sustain,
+        amp.release_ms,
+        filter_env.attack_ms,
+        filter_env.decay_ms,
+        filter_env.sustain,
+        filter_env.release_ms,
+        env3_dest_name(env3_dest),
+        assign_env.attack_ms,
+        assign_env.decay_ms,
+        assign_env.sustain,
+        assign_env.release_ms,
+    );
+
+    let mut events = vec![
+        ControlEvent::SetWave { waveform },
+        ControlEvent::SetCutoff { hz: cutoff_hz },
+        ControlEvent::SetResonance { amount: resonance },
+        ControlEvent::SetAttack { ms: amp.attack_ms },
+        ControlEvent::SetDecay { ms: amp.decay_ms },
+        ControlEvent::SetSustain { level: amp.sustain },
+        ControlEvent::SetRelease { ms: amp.release_ms },
+        ControlEvent::SetFiltEnvAmt {
+            amount: filtenv_amt,
+        },
+        ControlEvent::SetEnv3Dest { dest: env3_dest },
+        ControlEvent::SetEnv3Amt { amount: env3_amt },
+        ControlEvent::SetEnvVel { amount: envvel },
+    ];
+
+    if env_link {
+        events.push(ControlEvent::SetEnvLink { on: true });
+    } else {
+        events.push(ControlEvent::SetEnvLink { on: false });
+        events.push(ControlEvent::SetFiltEnvAttack {
+            ms: filter_env.attack_ms,
+        });
+        events.push(ControlEvent::SetFiltEnvDecay {
+            ms: filter_env.decay_ms,
+        });
+        events.push(ControlEvent::SetFiltEnvSustain {
+            level: filter_env.sustain,
+        });
+        events.push(ControlEvent::SetFiltEnvRelease {
+            ms: filter_env.release_ms,
+        });
+        events.push(ControlEvent::SetEnv3Attack {
+            ms: assign_env.attack_ms,
+        });
+        events.push(ControlEvent::SetEnv3Decay {
+            ms: assign_env.decay_ms,
+        });
+        events.push(ControlEvent::SetEnv3Sustain {
+            level: assign_env.sustain,
+        });
+        events.push(ControlEvent::SetEnv3Release {
+            ms: assign_env.release_ms,
+        });
+    }
+
+    ParamCommand {
+        events,
+        report: Some(report),
+    }
 }
 
 fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
@@ -504,7 +707,8 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             Ok(Some(ControlEvent::SetFiltEnvRelease { ms }))
         }
         "env3dest" => {
-            let name = arg.ok_or_else(|| "env3dest needs off, res, pitch, or cutoff".to_string())?;
+            let name =
+                arg.ok_or_else(|| "env3dest needs off, res, pitch, or cutoff".to_string())?;
             let dest = match name.to_ascii_lowercase().as_str() {
                 "off" => Env3Dest::Off,
                 "res" | "resonance" => Env3Dest::Resonance,
@@ -558,7 +762,7 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             Ok(Some(ControlEvent::SetEnvVel { amount }))
         }
         other => Err(format!(
-            "unknown command '{other}' (cutoff, res, attack, decay, sustain, release, wave, filtenv*, env3*, envcopy, envlink, envvel)"
+            "unknown command '{other}' (cutoff, res, attack, decay, sustain, release, wave, filtenv*, env3*, envcopy, envlink, envvel, random)"
         )),
     }
 }
@@ -572,6 +776,7 @@ fn parse_f32_arg(arg: Option<&str>, name: &str) -> Result<f32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
 
     #[test]
     fn parses_cutoff_and_wave() {
@@ -658,5 +863,111 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert!(parse_param_command("envlink maybe").is_err());
+    }
+
+    #[test]
+    fn rejects_random_with_extra_args() {
+        assert!(parse_line_commands("random extra").is_err());
+    }
+
+    #[test]
+    fn parses_random_command() {
+        let parsed = parse_line_commands("random")
+            .unwrap()
+            .expect("random should produce events");
+        assert!(parsed.events.len() > 1);
+        assert!(parsed.report.is_some());
+    }
+
+    #[test]
+    fn random_command_prints_a_replayable_patch() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let patch = generate_random_patch(&mut rng);
+        let report = patch.report.expect("random should print the patch");
+        assert!(report.contains("wave "));
+        assert!(report.contains("cutoff "));
+        assert!(report.contains("envlink "));
+        assert!(report.ends_with('\n'));
+        assert!(!patch.events.is_empty());
+    }
+
+    #[test]
+    fn random_patches_stay_in_range_and_respect_envlink() {
+        for seed in 0..32 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let patch = generate_random_patch(&mut rng);
+            let mut saw_link_on = false;
+            let mut saw_link_off = false;
+            let mut extra_env_times = 0usize;
+            let mut env3_dest = Env3Dest::Off;
+
+            for event in &patch.events {
+                match event {
+                    ControlEvent::SetCutoff { hz } => {
+                        assert!(*hz >= RANDOM_CUTOFF_MIN_HZ && *hz <= RANDOM_CUTOFF_MAX_HZ);
+                    }
+                    ControlEvent::SetResonance { amount } => {
+                        assert!(*amount >= 0.0 && *amount <= RANDOM_RES_MAX);
+                    }
+                    ControlEvent::SetAttack { ms }
+                    | ControlEvent::SetDecay { ms }
+                    | ControlEvent::SetRelease { ms } => {
+                        assert!(*ms >= RANDOM_TIME_MIN_MS && *ms <= RANDOM_TIME_MAX_MS);
+                    }
+                    ControlEvent::SetFiltEnvAttack { ms }
+                    | ControlEvent::SetFiltEnvDecay { ms }
+                    | ControlEvent::SetFiltEnvRelease { ms }
+                    | ControlEvent::SetEnv3Attack { ms }
+                    | ControlEvent::SetEnv3Decay { ms }
+                    | ControlEvent::SetEnv3Release { ms } => {
+                        extra_env_times += 1;
+                        assert!(*ms >= RANDOM_TIME_MIN_MS && *ms <= RANDOM_TIME_MAX_MS);
+                    }
+                    ControlEvent::SetSustain { level }
+                    | ControlEvent::SetEnvVel { amount: level } => {
+                        assert!(*level >= 0.0 && *level <= 1.0);
+                    }
+                    ControlEvent::SetFiltEnvSustain { level }
+                    | ControlEvent::SetEnv3Sustain { level } => {
+                        extra_env_times += 1;
+                        assert!(*level >= 0.0 && *level <= 1.0);
+                    }
+                    ControlEvent::SetFiltEnvAmt { amount } => {
+                        assert!(*amount >= RANDOM_AMT_MIN && *amount <= RANDOM_AMT_MAX);
+                    }
+                    ControlEvent::SetEnv3Dest { dest } => env3_dest = *dest,
+                    ControlEvent::SetEnv3Amt { amount } => match env3_dest {
+                        Env3Dest::Resonance => {
+                            assert!(*amount >= RANDOM_RES_AMT_MIN && *amount <= RANDOM_RES_AMT_MAX);
+                        }
+                        Env3Dest::Off | Env3Dest::Pitch | Env3Dest::Cutoff => {
+                            assert!(*amount >= RANDOM_AMT_MIN && *amount <= RANDOM_AMT_MAX);
+                        }
+                    },
+                    ControlEvent::SetEnvLink { on: true } => saw_link_on = true,
+                    ControlEvent::SetEnvLink { on: false } => saw_link_off = true,
+                    ControlEvent::SetWave { .. }
+                    | ControlEvent::NoteOn { .. }
+                    | ControlEvent::NoteOff { .. }
+                    | ControlEvent::EnvCopy => {}
+                }
+            }
+
+            assert!(
+                saw_link_on ^ saw_link_off,
+                "seed {seed}: expected exactly one envlink setting"
+            );
+            if saw_link_on {
+                assert_eq!(
+                    extra_env_times, 0,
+                    "seed {seed}: linked patch must not send extra envelope times"
+                );
+            } else {
+                assert_eq!(
+                    extra_env_times, 8,
+                    "seed {seed}: unlinked patch should set filter and env3 times"
+                );
+            }
+        }
     }
 }
