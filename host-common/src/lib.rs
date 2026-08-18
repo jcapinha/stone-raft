@@ -10,7 +10,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, FromSample, SizedSample};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use engine::{Engine, Waveform};
+use engine::{Engine, Env3Dest, EnvelopeId, Waveform};
 use midir::{MidiInput, MidiInputConnection, MidiInputPort};
 use rtrb::{Producer, RingBuffer};
 
@@ -30,6 +30,20 @@ enum ControlEvent {
     SetSustain { level: f32 },
     SetRelease { ms: f32 },
     SetWave { waveform: Waveform },
+    SetFiltEnvAmt { amount: f32 },
+    SetFiltEnvAttack { ms: f32 },
+    SetFiltEnvDecay { ms: f32 },
+    SetFiltEnvSustain { level: f32 },
+    SetFiltEnvRelease { ms: f32 },
+    SetEnv3Dest { dest: Env3Dest },
+    SetEnv3Amt { amount: f32 },
+    SetEnv3Attack { ms: f32 },
+    SetEnv3Decay { ms: f32 },
+    SetEnv3Sustain { level: f32 },
+    SetEnv3Release { ms: f32 },
+    EnvCopy,
+    SetEnvLink { on: bool },
+    SetEnvVel { amount: f32 },
 }
 
 /// Opens audio and MIDI (or keyboard fallback) and runs until the user quits.
@@ -149,11 +163,49 @@ fn apply_event(engine: &mut Engine, event: ControlEvent) {
         ControlEvent::NoteOff { note } => engine.note_off(note),
         ControlEvent::SetCutoff { hz } => engine.set_cutoff_hz(hz),
         ControlEvent::SetResonance { amount } => engine.set_resonance(amount),
-        ControlEvent::SetAttack { ms } => engine.set_attack_ms(ms),
-        ControlEvent::SetDecay { ms } => engine.set_decay_ms(ms),
-        ControlEvent::SetSustain { level } => engine.set_sustain(level),
-        ControlEvent::SetRelease { ms } => engine.set_release_ms(ms),
+        ControlEvent::SetAttack { ms } => {
+            engine.patch_envelope(EnvelopeId::Amp, |times| times.attack_ms = ms)
+        }
+        ControlEvent::SetDecay { ms } => {
+            engine.patch_envelope(EnvelopeId::Amp, |times| times.decay_ms = ms)
+        }
+        ControlEvent::SetSustain { level } => {
+            engine.patch_envelope(EnvelopeId::Amp, |times| times.sustain = level)
+        }
+        ControlEvent::SetRelease { ms } => {
+            engine.patch_envelope(EnvelopeId::Amp, |times| times.release_ms = ms)
+        }
         ControlEvent::SetWave { waveform } => engine.set_waveform(waveform),
+        ControlEvent::SetFiltEnvAmt { amount } => engine.set_filtenv_amt(amount),
+        ControlEvent::SetFiltEnvAttack { ms } => {
+            engine.patch_envelope(EnvelopeId::Filter, |times| times.attack_ms = ms)
+        }
+        ControlEvent::SetFiltEnvDecay { ms } => {
+            engine.patch_envelope(EnvelopeId::Filter, |times| times.decay_ms = ms)
+        }
+        ControlEvent::SetFiltEnvSustain { level } => {
+            engine.patch_envelope(EnvelopeId::Filter, |times| times.sustain = level)
+        }
+        ControlEvent::SetFiltEnvRelease { ms } => {
+            engine.patch_envelope(EnvelopeId::Filter, |times| times.release_ms = ms)
+        }
+        ControlEvent::SetEnv3Dest { dest } => engine.set_env3_dest(dest),
+        ControlEvent::SetEnv3Amt { amount } => engine.set_env3_amt(amount),
+        ControlEvent::SetEnv3Attack { ms } => {
+            engine.patch_envelope(EnvelopeId::Assignable, |times| times.attack_ms = ms)
+        }
+        ControlEvent::SetEnv3Decay { ms } => {
+            engine.patch_envelope(EnvelopeId::Assignable, |times| times.decay_ms = ms)
+        }
+        ControlEvent::SetEnv3Sustain { level } => {
+            engine.patch_envelope(EnvelopeId::Assignable, |times| times.sustain = level)
+        }
+        ControlEvent::SetEnv3Release { ms } => {
+            engine.patch_envelope(EnvelopeId::Assignable, |times| times.release_ms = ms)
+        }
+        ControlEvent::EnvCopy => engine.env_copy(),
+        ControlEvent::SetEnvLink { on } => engine.set_env_link(on),
+        ControlEvent::SetEnvVel { amount } => engine.set_envvel(amount),
     }
 }
 
@@ -249,6 +301,12 @@ fn print_param_help() {
     println!("Param commands:");
     println!("  cutoff <Hz>   res <0..1>   wave saw|square");
     println!("  attack <ms>   decay <ms>   sustain <0..1>   release <ms>");
+    println!(
+        "  filtenvamt <signed octaves>   filtenvattack/decay/release <ms>   filtenvsustain <0..1>"
+    );
+    println!("  env3dest off|res|pitch|cutoff   env3amt <signed>");
+    println!("  env3attack/decay/release <ms>   env3sustain <0..1>");
+    println!("  envcopy   envlink on|off   envvel <0..1>");
 }
 
 fn key_to_note(code: KeyCode) -> Option<u8> {
@@ -425,8 +483,82 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             };
             Ok(Some(ControlEvent::SetWave { waveform }))
         }
+        "filtenvamt" => {
+            let amount = parse_f32_arg(arg, "filtenvamt")?;
+            Ok(Some(ControlEvent::SetFiltEnvAmt { amount }))
+        }
+        "filtenvattack" => {
+            let ms = parse_f32_arg(arg, "filtenvattack")?;
+            Ok(Some(ControlEvent::SetFiltEnvAttack { ms }))
+        }
+        "filtenvdecay" => {
+            let ms = parse_f32_arg(arg, "filtenvdecay")?;
+            Ok(Some(ControlEvent::SetFiltEnvDecay { ms }))
+        }
+        "filtenvsustain" => {
+            let level = parse_f32_arg(arg, "filtenvsustain")?;
+            Ok(Some(ControlEvent::SetFiltEnvSustain { level }))
+        }
+        "filtenvrelease" => {
+            let ms = parse_f32_arg(arg, "filtenvrelease")?;
+            Ok(Some(ControlEvent::SetFiltEnvRelease { ms }))
+        }
+        "env3dest" => {
+            let name = arg.ok_or_else(|| "env3dest needs off, res, pitch, or cutoff".to_string())?;
+            let dest = match name.to_ascii_lowercase().as_str() {
+                "off" => Env3Dest::Off,
+                "res" | "resonance" => Env3Dest::Resonance,
+                "pitch" => Env3Dest::Pitch,
+                "cutoff" => Env3Dest::Cutoff,
+                other => {
+                    return Err(format!(
+                        "unknown dest '{other}' (use off, res, pitch, or cutoff)"
+                    ));
+                }
+            };
+            Ok(Some(ControlEvent::SetEnv3Dest { dest }))
+        }
+        "env3amt" => {
+            let amount = parse_f32_arg(arg, "env3amt")?;
+            Ok(Some(ControlEvent::SetEnv3Amt { amount }))
+        }
+        "env3attack" => {
+            let ms = parse_f32_arg(arg, "env3attack")?;
+            Ok(Some(ControlEvent::SetEnv3Attack { ms }))
+        }
+        "env3decay" => {
+            let ms = parse_f32_arg(arg, "env3decay")?;
+            Ok(Some(ControlEvent::SetEnv3Decay { ms }))
+        }
+        "env3sustain" => {
+            let level = parse_f32_arg(arg, "env3sustain")?;
+            Ok(Some(ControlEvent::SetEnv3Sustain { level }))
+        }
+        "env3release" => {
+            let ms = parse_f32_arg(arg, "env3release")?;
+            Ok(Some(ControlEvent::SetEnv3Release { ms }))
+        }
+        "envcopy" => {
+            if arg.is_some() {
+                return Err("too many arguments".to_string());
+            }
+            Ok(Some(ControlEvent::EnvCopy))
+        }
+        "envlink" => {
+            let name = arg.ok_or_else(|| "envlink needs on or off".to_string())?;
+            let on = match name.to_ascii_lowercase().as_str() {
+                "on" => true,
+                "off" => false,
+                other => return Err(format!("unknown envlink '{other}' (use on or off)")),
+            };
+            Ok(Some(ControlEvent::SetEnvLink { on }))
+        }
+        "envvel" => {
+            let amount = parse_f32_arg(arg, "envvel")?;
+            Ok(Some(ControlEvent::SetEnvVel { amount }))
+        }
         other => Err(format!(
-            "unknown command '{other}' (cutoff, res, attack, decay, sustain, release, wave)"
+            "unknown command '{other}' (cutoff, res, attack, decay, sustain, release, wave, filtenv*, env3*, envcopy, envlink, envvel)"
         )),
     }
 }
@@ -458,5 +590,73 @@ mod tests {
     #[test]
     fn rejects_unknown_command() {
         assert!(parse_param_command("foo 1").is_err());
+    }
+
+    #[test]
+    fn parses_filtenvamt_signed() {
+        match parse_param_command("filtenvamt -2.5").unwrap() {
+            Some(ControlEvent::SetFiltEnvAmt { amount }) => {
+                assert!((amount + 2.5).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_env3dest_tokens_and_alias() {
+        match parse_param_command("env3dest off").unwrap() {
+            Some(ControlEvent::SetEnv3Dest {
+                dest: Env3Dest::Off,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("env3dest res").unwrap() {
+            Some(ControlEvent::SetEnv3Dest {
+                dest: Env3Dest::Resonance,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("env3dest resonance").unwrap() {
+            Some(ControlEvent::SetEnv3Dest {
+                dest: Env3Dest::Resonance,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("env3dest pitch").unwrap() {
+            Some(ControlEvent::SetEnv3Dest {
+                dest: Env3Dest::Pitch,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("env3dest cutoff").unwrap() {
+            Some(ControlEvent::SetEnv3Dest {
+                dest: Env3Dest::Cutoff,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_env3dest() {
+        let err = parse_param_command("env3dest pwm").unwrap_err();
+        assert!(err.contains("unknown dest"));
+    }
+
+    #[test]
+    fn parses_envcopy_and_envlink() {
+        match parse_param_command("envcopy").unwrap() {
+            Some(ControlEvent::EnvCopy) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(parse_param_command("envcopy extra").is_err());
+        match parse_param_command("envlink on").unwrap() {
+            Some(ControlEvent::SetEnvLink { on: true }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("envlink off").unwrap() {
+            Some(ControlEvent::SetEnvLink { on: false }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(parse_param_command("envlink maybe").is_err());
     }
 }

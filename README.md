@@ -108,6 +108,20 @@ While audio is running, change subtractive params with named line commands (no M
 | `sustain <0..1>` | Amp envelope sustain level |
 | `release <ms>` | Amp envelope release time |
 | `wave saw` / `wave square` | Oscillator shape for all voices |
+| `filtenvamt <signed>` | Filter envelope amount in octaves, e.g. `filtenvamt 3` or `filtenvamt -2` |
+| `filtenvattack <ms>` | Filter envelope attack time |
+| `filtenvdecay <ms>` | Filter envelope decay time |
+| `filtenvsustain <0..1>` | Filter envelope sustain level |
+| `filtenvrelease <ms>` | Filter envelope release time |
+| `env3dest off` / `res` / `pitch` / `cutoff` | Assignable envelope destination (`resonance` is an alias of `res`) |
+| `env3amt <signed>` | Assignable envelope amount. Octaves for pitch and cutoff. For resonance the useful range is about ±1 |
+| `env3attack <ms>` | Assignable envelope attack time |
+| `env3decay <ms>` | Assignable envelope decay time |
+| `env3sustain <0..1>` | Assignable envelope sustain level |
+| `env3release <ms>` | Assignable envelope release time |
+| `envcopy` | Copy amp times onto the filter and assignable envelopes |
+| `envlink on` / `envlink off` | When on, amp time commands also write the other two envelopes |
+| `envvel <0..1>` | Shared velocity scaling for extra envelope amounts |
 
 Example (one command per line, or after `/` in keyboard mode):
 

@@ -4,7 +4,7 @@ mod envelope;
 mod filter;
 mod oscillator;
 
-pub use envelope::{velocity_to_amp, Adsr, EnvelopeStage};
+pub use envelope::{Adsr, AdsrTimes, EnvelopeStage, velocity_to_amp};
 pub use filter::Svf;
 pub use oscillator::{Oscillator, Waveform};
 
@@ -18,18 +18,49 @@ pub const VOICE_COUNT: usize = 4;
 /// Conservative per-voice gain so a few bright voices stay near full scale.
 const VOICE_AMPLITUDE: f32 = 0.12;
 
+const AMT_MIN: f32 = -8.0;
+const AMT_MAX: f32 = 8.0;
+
+/// Destination for the assignable envelope. More destinations can be added later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Env3Dest {
+    Off,
+    Resonance,
+    Pitch,
+    Cutoff,
+}
+
+/// Which of the three ADSRs on a voice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopeId {
+    Amp,
+    Filter,
+    Assignable,
+}
+
 /// Converts a MIDI note number to frequency in Hz (A4 = 69 = 440 Hz).
 pub fn midi_note_to_hz(note: u8) -> f32 {
     let semitones_from_a4 = f32::from(note) - 69.0;
     440.0 * libm::powf(2.0, semitones_from_a4 / 12.0)
 }
 
+pub(crate) fn hz_times_octaves(hz: f32, octaves: f32) -> f32 {
+    hz * libm::powf(2.0, octaves)
+}
+
+fn effective_envelope_amount(amount: f32, envvel: f32, vel: f32) -> f32 {
+    amount * (1.0 - envvel + envvel * vel)
+}
+
 struct Voice {
     oscillator: VoiceOsc,
     filter: VoiceFilter,
     amp: Adsr,
+    filter_env: Adsr,
+    assign_env: Adsr,
     note: u8,
     velocity_amp: f32,
+    base_hz: f32,
     /// Monotonic age stamp; higher means more recently started (used for steal).
     age: u32,
 }
@@ -40,8 +71,11 @@ impl Voice {
             oscillator: VoiceOsc::new(sample_rate_hz, 440.0, waveform),
             filter: VoiceFilter::new(),
             amp: Adsr::new(sample_rate_hz),
+            filter_env: Adsr::new(sample_rate_hz),
+            assign_env: Adsr::new(sample_rate_hz),
             note: 0,
             velocity_amp: 1.0,
+            base_hz: 440.0,
             age: 0,
         }
     }
@@ -60,10 +94,14 @@ pub struct EngineParams {
     pub waveform: Waveform,
     pub cutoff_hz: f32,
     pub resonance: f32,
-    pub attack_ms: f32,
-    pub decay_ms: f32,
-    pub sustain: f32,
-    pub release_ms: f32,
+    pub amp: AdsrTimes,
+    pub filter_env: AdsrTimes,
+    pub assign_env: AdsrTimes,
+    pub filtenv_amt: f32,
+    pub env3_amt: f32,
+    pub env3_dest: Env3Dest,
+    pub env_link: bool,
+    pub envvel: f32,
 }
 
 impl Default for EngineParams {
@@ -72,10 +110,24 @@ impl Default for EngineParams {
             waveform: Waveform::Saw,
             cutoff_hz: 2_000.0,
             resonance: 0.2,
-            attack_ms: 10.0,
-            decay_ms: 100.0,
-            sustain: 0.7,
-            release_ms: 200.0,
+            amp: AdsrTimes::default(),
+            filter_env: AdsrTimes::default(),
+            assign_env: AdsrTimes::default(),
+            filtenv_amt: 0.0,
+            env3_amt: 0.0,
+            env3_dest: Env3Dest::Off,
+            env_link: false,
+            envvel: 0.0,
+        }
+    }
+}
+
+impl EngineParams {
+    pub fn envelope(&self, which: EnvelopeId) -> AdsrTimes {
+        match which {
+            EnvelopeId::Amp => self.amp,
+            EnvelopeId::Filter => self.filter_env,
+            EnvelopeId::Assignable => self.assign_env,
         }
     }
 }
@@ -125,34 +177,79 @@ impl Engine {
         self.params.resonance = resonance.clamp(0.0, 1.0);
     }
 
-    pub fn set_attack_ms(&mut self, attack_ms: f32) {
-        self.params.attack_ms = attack_ms.max(0.0);
+    /// Sets ADSR times for one envelope. Amp follows envelope link. Filter or assignable unlinks.
+    pub fn set_envelope(&mut self, which: EnvelopeId, times: AdsrTimes) {
+        let times = times.clamped();
+        match which {
+            EnvelopeId::Amp => {
+                self.params.amp = times;
+                if self.params.env_link {
+                    self.params.filter_env = times;
+                    self.params.assign_env = times;
+                }
+            }
+            EnvelopeId::Filter => {
+                self.unlink_if_needed();
+                self.params.filter_env = times;
+            }
+            EnvelopeId::Assignable => {
+                self.unlink_if_needed();
+                self.params.assign_env = times;
+            }
+        }
         self.apply_envelope_params_to_all();
     }
 
-    pub fn set_decay_ms(&mut self, decay_ms: f32) {
-        self.params.decay_ms = decay_ms.max(0.0);
-        self.apply_envelope_params_to_all();
+    /// Changes one envelope's times in place. Amp follows envelope link. Filter or assignable unlinks.
+    pub fn patch_envelope(&mut self, which: EnvelopeId, patch: impl FnOnce(&mut AdsrTimes)) {
+        let mut times = self.params.envelope(which);
+        patch(&mut times);
+        self.set_envelope(which, times);
     }
 
-    pub fn set_sustain(&mut self, sustain: f32) {
-        self.params.sustain = sustain.clamp(0.0, 1.0);
-        self.apply_envelope_params_to_all();
+    pub fn set_filtenv_amt(&mut self, amount: f32) {
+        self.params.filtenv_amt = amount.clamp(AMT_MIN, AMT_MAX);
     }
 
-    pub fn set_release_ms(&mut self, release_ms: f32) {
-        self.params.release_ms = release_ms.max(0.0);
+    pub fn set_env3_dest(&mut self, dest: Env3Dest) {
+        self.params.env3_dest = dest;
+    }
+
+    pub fn set_env3_amt(&mut self, amount: f32) {
+        self.params.env3_amt = amount.clamp(AMT_MIN, AMT_MAX);
+    }
+
+    pub fn env_copy(&mut self) {
+        self.copy_amp_times_to_extra_envelopes();
+    }
+
+    pub fn set_env_link(&mut self, on: bool) {
+        self.params.env_link = on;
+        if on {
+            self.copy_amp_times_to_extra_envelopes();
+        }
+    }
+
+    pub fn set_envvel(&mut self, amount: f32) {
+        self.params.envvel = amount.clamp(0.0, 1.0);
+    }
+
+    fn unlink_if_needed(&mut self) {
+        if self.params.env_link {
+            self.params.env_link = false;
+        }
+    }
+
+    fn copy_amp_times_to_extra_envelopes(&mut self) {
+        self.params.filter_env = self.params.amp;
+        self.params.assign_env = self.params.amp;
         self.apply_envelope_params_to_all();
     }
 
     fn apply_envelope_params_to_all(&mut self) {
-        let attack = self.params.attack_ms;
-        let decay = self.params.decay_ms;
-        let release = self.params.release_ms;
-        let sustain = self.params.sustain;
+        let params = &self.params;
         for voice in self.voices.iter_mut() {
-            voice.amp.set_times_ms(attack, decay, release);
-            voice.amp.set_sustain(sustain);
+            apply_envelope_params_to_voice(voice, params);
         }
     }
 
@@ -187,6 +284,8 @@ impl Engine {
         for voice in self.voices.iter_mut() {
             if voice.is_active() && voice.note == note {
                 voice.amp.note_off();
+                voice.filter_env.note_off();
+                voice.assign_env.note_off();
             }
         }
     }
@@ -216,40 +315,73 @@ impl Engine {
     fn start_voice(&mut self, index: usize, note: u8, velocity: u8, age: u32) {
         let sample_rate = self.sample_rate_hz;
         let waveform = self.params.waveform;
-        let attack = self.params.attack_ms;
-        let decay = self.params.decay_ms;
-        let release = self.params.release_ms;
-        let sustain = self.params.sustain;
+        let base_hz = midi_note_to_hz(note);
 
         let voice = &mut self.voices[index];
-        voice.oscillator = VoiceOsc::new(sample_rate, midi_note_to_hz(note), waveform);
+        voice.oscillator = VoiceOsc::new(sample_rate, base_hz, waveform);
         voice.filter.reset();
-        voice.amp.set_times_ms(attack, decay, release);
-        voice.amp.set_sustain(sustain);
+        apply_envelope_params_to_voice(voice, &self.params);
         voice.amp.note_on();
+        voice.filter_env.note_on();
+        voice.assign_env.note_on();
         voice.note = note;
         voice.velocity_amp = vel_amp(velocity);
+        voice.base_hz = base_hz;
         voice.age = age;
     }
 
     /// Sums active voices into one mono sample in roughly [-1.0, 1.0].
     pub fn next_sample(&mut self) -> f32 {
         let sample_rate = self.sample_rate_hz;
-        let cutoff = self.params.cutoff_hz;
-        let resonance = self.params.resonance;
+        let cutoff_base = self.params.cutoff_hz;
+        let resonance_base = self.params.resonance;
+        let filtenv_amt = self.params.filtenv_amt;
+        let env3_amt = self.params.env3_amt;
+        let env3_dest = self.params.env3_dest;
+        let envvel = self.params.envvel;
 
         let mut mix = 0.0;
         for voice in self.voices.iter_mut() {
             if !voice.is_active() {
                 continue;
             }
+
+            let filt_level = voice.filter_env.next_level();
+            let assign_level = voice.assign_env.next_level();
+            let vel = voice.velocity_amp;
+            let filt_oct = filt_level * effective_envelope_amount(filtenv_amt, envvel, vel);
+            let env3_effective = effective_envelope_amount(env3_amt, envvel, vel);
+
+            let (env3_cutoff_oct, resonance, osc_hz) = match env3_dest {
+                Env3Dest::Off => (0.0, resonance_base, voice.base_hz),
+                Env3Dest::Resonance => (
+                    0.0,
+                    resonance_base + assign_level * env3_effective,
+                    voice.base_hz,
+                ),
+                Env3Dest::Pitch => {
+                    let hz = hz_times_octaves(voice.base_hz, assign_level * env3_effective);
+                    let hz = hz.clamp(20.0, sample_rate * 0.25);
+                    (0.0, resonance_base, hz)
+                }
+                Env3Dest::Cutoff => (assign_level * env3_effective, resonance_base, voice.base_hz),
+            };
+
+            let cutoff_hz = hz_times_octaves(cutoff_base, filt_oct + env3_cutoff_oct);
+            voice.oscillator.set_frequency(sample_rate, osc_hz);
             let osc = voice.oscillator.next_sample();
-            let filtered = voice.filter.process(osc, sample_rate, cutoff, resonance);
+            let filtered = voice.filter.process(osc, sample_rate, cutoff_hz, resonance);
             let amp = voice.amp.next_level();
             mix += filtered * amp * voice.velocity_amp * VOICE_AMPLITUDE;
         }
         mix
     }
+}
+
+fn apply_envelope_params_to_voice(voice: &mut Voice, params: &EngineParams) {
+    params.amp.apply_to(&mut voice.amp);
+    params.filter_env.apply_to(&mut voice.filter_env);
+    params.assign_env.apply_to(&mut voice.assign_env);
 }
 
 #[cfg(test)]
@@ -279,6 +411,30 @@ mod tests {
 
     fn peak_abs(samples: &[f32]) -> f32 {
         samples.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()))
+    }
+
+    fn set_fast_amp_sustain(engine: &mut Engine) {
+        engine.patch_envelope(EnvelopeId::Amp, |times| {
+            times.attack_ms = 1.0;
+            times.decay_ms = 1.0;
+            times.sustain = 1.0;
+        });
+    }
+
+    fn set_fast_filter_env_sustain(engine: &mut Engine) {
+        engine.patch_envelope(EnvelopeId::Filter, |times| {
+            times.attack_ms = 1.0;
+            times.decay_ms = 1.0;
+            times.sustain = 1.0;
+        });
+    }
+
+    fn set_fast_assign_env_sustain(engine: &mut Engine) {
+        engine.patch_envelope(EnvelopeId::Assignable, |times| {
+            times.attack_ms = 1.0;
+            times.decay_ms = 1.0;
+            times.sustain = 1.0;
+        });
     }
 
     #[test]
@@ -338,13 +494,8 @@ mod tests {
         bright.set_cutoff_hz(8_000.0);
         dark.set_resonance(0.0);
         bright.set_resonance(0.0);
-        // Fast amp so analysis is mostly sustain.
-        dark.set_attack_ms(1.0);
-        bright.set_attack_ms(1.0);
-        dark.set_decay_ms(1.0);
-        bright.set_decay_ms(1.0);
-        dark.set_sustain(1.0);
-        bright.set_sustain(1.0);
+        set_fast_amp_sustain(&mut dark);
+        set_fast_amp_sustain(&mut bright);
 
         dark.note_on(57, 127); // A3 ≈ 220 Hz
         bright.note_on(57, 127);
@@ -367,10 +518,15 @@ mod tests {
     #[test]
     fn note_off_fades_instead_of_hard_cut() {
         let mut engine = Engine::new(SAMPLE_RATE_HZ);
-        engine.set_attack_ms(1.0);
-        engine.set_decay_ms(1.0);
-        engine.set_sustain(1.0);
-        engine.set_release_ms(50.0);
+        engine.set_envelope(
+            EnvelopeId::Amp,
+            AdsrTimes {
+                attack_ms: 1.0,
+                decay_ms: 1.0,
+                sustain: 1.0,
+                release_ms: 50.0,
+            },
+        );
         engine.note_on(60, 127);
         for _ in 0..2_000 {
             engine.next_sample();
@@ -403,10 +559,15 @@ mod tests {
     #[test]
     fn fifth_note_prefers_stealing_releasing_voice() {
         let mut engine = Engine::new(SAMPLE_RATE_HZ);
-        engine.set_attack_ms(1.0);
-        engine.set_decay_ms(1.0);
-        engine.set_sustain(1.0);
-        engine.set_release_ms(500.0);
+        engine.set_envelope(
+            EnvelopeId::Amp,
+            AdsrTimes {
+                attack_ms: 1.0,
+                decay_ms: 1.0,
+                sustain: 1.0,
+                release_ms: 500.0,
+            },
+        );
 
         engine.note_on(60, 127);
         engine.note_on(62, 127);
@@ -438,9 +599,7 @@ mod tests {
         let mut quiet = Engine::new(SAMPLE_RATE_HZ);
         let mut loud = Engine::new(SAMPLE_RATE_HZ);
         for engine in [&mut quiet, &mut loud] {
-            engine.set_attack_ms(1.0);
-            engine.set_decay_ms(1.0);
-            engine.set_sustain(1.0);
+            set_fast_amp_sustain(engine);
             engine.set_cutoff_hz(8_000.0);
         }
         quiet.note_on(60, 40);
@@ -473,9 +632,7 @@ mod tests {
         let mut saw = Engine::new(SAMPLE_RATE_HZ);
         let mut square = Engine::new(SAMPLE_RATE_HZ);
         for engine in [&mut saw, &mut square] {
-            engine.set_attack_ms(1.0);
-            engine.set_decay_ms(1.0);
-            engine.set_sustain(1.0);
+            set_fast_amp_sustain(engine);
             engine.set_cutoff_hz(10_000.0);
             engine.set_resonance(0.0);
         }
@@ -496,6 +653,212 @@ mod tests {
         assert!(
             square_h3 > saw_h3,
             "square should have stronger 3rd harmonic than saw; saw={saw_h3} square={square_h3}"
+        );
+    }
+
+    #[test]
+    fn stacked_octaves_match_summed_offset() {
+        let base = 2_000.0;
+        let successive = hz_times_octaves(hz_times_octaves(base, 2.0), 2.0);
+        let summed = hz_times_octaves(base, 2.0 + 2.0);
+        let four = hz_times_octaves(base, 4.0);
+        assert!((successive - summed).abs() < 1e-3);
+        assert!((summed - four).abs() < 1e-3);
+    }
+
+    #[test]
+    fn filter_envelope_amount_opens_cutoff_at_sustain() {
+        let mut closed = Engine::new(SAMPLE_RATE_HZ);
+        let mut opened = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut closed, &mut opened] {
+            engine.set_waveform(Waveform::Square);
+            engine.set_cutoff_hz(400.0);
+            engine.set_resonance(0.0);
+            set_fast_amp_sustain(engine);
+            set_fast_filter_env_sustain(engine);
+        }
+        closed.set_filtenv_amt(0.0);
+        opened.set_filtenv_amt(4.0);
+
+        closed.note_on(57, 127);
+        opened.note_on(57, 127);
+        for _ in 0..2_000 {
+            closed.next_sample();
+            opened.next_sample();
+        }
+        let closed_samples = take_samples(&mut closed, ANALYSIS_SAMPLES);
+        let opened_samples = take_samples(&mut opened, ANALYSIS_SAMPLES);
+        let harmonic_hz = midi_note_to_hz(57) * 5.0;
+        let closed_h = tone_strength(&closed_samples, harmonic_hz);
+        let opened_h = tone_strength(&opened_samples, harmonic_hz);
+        assert!(
+            opened_h > closed_h * 1.5,
+            "expected positive filtenvamt to pass more 5th harmonic; closed={closed_h} opened={opened_h}"
+        );
+    }
+
+    #[test]
+    fn cutoff_stacking_matches_equivalent_filter_amount() {
+        let mut stacked = Engine::new(SAMPLE_RATE_HZ);
+        let mut combined = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut stacked, &mut combined] {
+            engine.set_waveform(Waveform::Square);
+            engine.set_cutoff_hz(400.0);
+            engine.set_resonance(0.0);
+            set_fast_amp_sustain(engine);
+            set_fast_filter_env_sustain(engine);
+            set_fast_assign_env_sustain(engine);
+        }
+        stacked.set_env3_dest(Env3Dest::Cutoff);
+        stacked.set_filtenv_amt(2.0);
+        stacked.set_env3_amt(2.0);
+        combined.set_filtenv_amt(4.0);
+        combined.set_env3_amt(0.0);
+
+        stacked.note_on(57, 127);
+        combined.note_on(57, 127);
+        for _ in 0..2_000 {
+            stacked.next_sample();
+            combined.next_sample();
+        }
+        let stacked_samples = take_samples(&mut stacked, ANALYSIS_SAMPLES);
+        let combined_samples = take_samples(&mut combined, ANALYSIS_SAMPLES);
+        let harmonic_hz = midi_note_to_hz(57) * 5.0;
+        let stacked_h = tone_strength(&stacked_samples, harmonic_hz);
+        let combined_h = tone_strength(&combined_samples, harmonic_hz);
+        let denom = stacked_h.max(combined_h).max(1e-6);
+        assert!(
+            (stacked_h - combined_h).abs() / denom < 0.2,
+            "stacked 2+2 octaves should match filter amt 4; stacked={stacked_h} combined={combined_h}"
+        );
+    }
+
+    #[test]
+    fn pitch_dest_plus_one_octave_at_sustain() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        engine.set_waveform(Waveform::Saw);
+        engine.set_cutoff_hz(10_000.0);
+        engine.set_resonance(0.0);
+        set_fast_amp_sustain(&mut engine);
+        set_fast_assign_env_sustain(&mut engine);
+        engine.set_env3_dest(Env3Dest::Pitch);
+        engine.set_env3_amt(1.0);
+
+        let note = 57u8;
+        engine.note_on(note, 127);
+        for _ in 0..2_000 {
+            engine.next_sample();
+        }
+        let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
+        let base_hz = midi_note_to_hz(note);
+        let shifted_hz = base_hz * 2.0;
+        let at_base = tone_strength(&samples, base_hz);
+        let at_octave = tone_strength(&samples, shifted_hz);
+        assert!(
+            at_octave > TONE_PRESENT,
+            "expected energy near +1 octave ({shifted_hz} Hz), got {at_octave}"
+        );
+        assert!(
+            at_octave > at_base,
+            "octave should dominate original pitch; base={at_base} octave={at_octave}"
+        );
+    }
+
+    #[test]
+    fn envcopy_and_envlink_then_unlink_on_extra_times() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        engine.set_envelope(
+            EnvelopeId::Amp,
+            AdsrTimes {
+                attack_ms: 50.0,
+                decay_ms: 80.0,
+                sustain: 0.4,
+                release_ms: 150.0,
+            },
+        );
+
+        engine.env_copy();
+        assert!((engine.params().filter_env.attack_ms - 50.0).abs() < f32::EPSILON);
+        assert!((engine.params().filter_env.decay_ms - 80.0).abs() < f32::EPSILON);
+        assert!((engine.params().filter_env.sustain - 0.4).abs() < f32::EPSILON);
+        assert!((engine.params().filter_env.release_ms - 150.0).abs() < f32::EPSILON);
+        assert!((engine.params().assign_env.attack_ms - 50.0).abs() < f32::EPSILON);
+        assert!(!engine.params().env_link);
+
+        engine.set_env_link(true);
+        assert!(engine.params().env_link);
+        engine.patch_envelope(EnvelopeId::Amp, |times| times.attack_ms = 90.0);
+        assert!((engine.params().filter_env.attack_ms - 90.0).abs() < f32::EPSILON);
+        assert!((engine.params().assign_env.attack_ms - 90.0).abs() < f32::EPSILON);
+
+        engine.patch_envelope(EnvelopeId::Filter, |times| times.attack_ms = 12.0);
+        assert!(!engine.params().env_link);
+        assert!((engine.params().filter_env.attack_ms - 12.0).abs() < f32::EPSILON);
+        engine.patch_envelope(EnvelopeId::Amp, |times| times.attack_ms = 200.0);
+        assert!((engine.params().amp.attack_ms - 200.0).abs() < f32::EPSILON);
+        assert!((engine.params().filter_env.attack_ms - 12.0).abs() < f32::EPSILON);
+
+        engine.set_env_link(true);
+        engine.patch_envelope(EnvelopeId::Assignable, |times| times.decay_ms = 33.0);
+        assert!(!engine.params().env_link);
+        assert!((engine.params().assign_env.decay_ms - 33.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn set_envelope_clamps_times_and_sustain() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        engine.set_envelope(
+            EnvelopeId::Amp,
+            AdsrTimes {
+                attack_ms: -5.0,
+                decay_ms: -1.0,
+                sustain: 2.0,
+                release_ms: -8.0,
+            },
+        );
+        let amp = engine.params().amp;
+        assert_eq!(amp.attack_ms, 0.0);
+        assert_eq!(amp.decay_ms, 0.0);
+        assert_eq!(amp.sustain, 1.0);
+        assert_eq!(amp.release_ms, 0.0);
+    }
+
+    #[test]
+    fn envvel_scales_pitch_dest_by_velocity() {
+        let mut quiet = Engine::new(SAMPLE_RATE_HZ);
+        let mut loud = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut quiet, &mut loud] {
+            engine.set_waveform(Waveform::Saw);
+            engine.set_cutoff_hz(10_000.0);
+            engine.set_resonance(0.0);
+            set_fast_amp_sustain(engine);
+            set_fast_assign_env_sustain(engine);
+            engine.set_env3_dest(Env3Dest::Pitch);
+            engine.set_env3_amt(1.0);
+            engine.set_envvel(1.0);
+        }
+
+        let note = 57u8;
+        quiet.note_on(note, 32);
+        loud.note_on(note, 127);
+        for _ in 0..2_000 {
+            quiet.next_sample();
+            loud.next_sample();
+        }
+        let quiet_samples = take_samples(&mut quiet, ANALYSIS_SAMPLES);
+        let loud_samples = take_samples(&mut loud, ANALYSIS_SAMPLES);
+        let base_hz = midi_note_to_hz(note);
+        let octave_hz = base_hz * 2.0;
+        let quiet_at_octave = tone_strength(&quiet_samples, octave_hz);
+        let loud_at_octave = tone_strength(&loud_samples, octave_hz);
+        let quiet_at_base = tone_strength(&quiet_samples, base_hz);
+        assert!(
+            loud_at_octave > quiet_at_octave,
+            "high velocity should shift pitch more toward +1 octave; quiet={quiet_at_octave} loud={loud_at_octave}"
+        );
+        assert!(
+            quiet_at_base > quiet_at_octave,
+            "low velocity with envvel 1 should stay nearer the original pitch; base={quiet_at_base} octave={quiet_at_octave}"
         );
     }
 }

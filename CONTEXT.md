@@ -30,6 +30,19 @@ A sound recipe: start with a harmonically rich waveform, then shape it with a fi
 A timed shape that runs when a note starts and ends. Attack, Decay, Sustain, and Release describe how a level rises, falls to a held value, then fades after note-off.
 _Avoid_: using “envelope” alone when amp vs filter vs assignable must be distinguished
 
+**Filter envelope**:
+Dedicated ADSR that moves cutoff over each note. Amount is signed octaves. The cutoff knob is the frequency when this envelope’s level is 0.
+
+**Assignable envelope**:
+Third ADSR per voice. Destination is off, resonance, pitch, or cutoff. Terminal commands use the `env3` prefix. More destinations can be added later.
+_Avoid_: env2, mod envelope
+
+**Envelope amount**:
+How far an envelope moves its destination. Filter amount is octaves. Assignable amount is octaves for pitch and cutoff, and linear for resonance.
+
+**Envelope link**:
+When on, amp ADSR commands also write filter and assignable envelope times. A per-envelope time command turns link off.
+
 **Cutoff**:
 The filter frequency above which a lowpass turns brightness down.
 
@@ -54,16 +67,19 @@ A Cargo workspace with a shared `engine` crate, shared laptop host plumbing in `
 The engine is written in no_std style (fixed-size data, no heap, minimal dependencies) from day one, so the exact same DSP runs on the laptop and the Daisy. FunDSP may be studied as a reference but is not a dependency.
 
 **Subtractive engine path and roadmap**
-The first engine is subtractive: one oscillator per voice (PolyBLEP saw or square, live waveform select) into a per-voice state-variable filter (SVF) into a full amp ADSR with exponential-ish segments, then summed. Velocity scales amp with a curved mapping (unit-tested; keyboard still uses fixed velocity). End state for this recipe is three envelopes: amp (now), filter (next session after this), then a third assignable to other parameters. Planned later on the same recipe: pulse width, dual-oscillator mix, a learning look at Moog-style ladder filters, and a possible reevaluation of heavier band-limited oscillators. Wavetable remains a separate future engine.
+The first engine is subtractive: one oscillator per voice (PolyBLEP saw or square, live waveform select) into a per-voice state-variable filter (SVF) into a full amp ADSR with exponential-ish segments, then summed. Velocity scales amp with a curved mapping (unit-tested; keyboard still uses fixed velocity). Each voice has three ADSRs: amp, a dedicated filter envelope, and an assignable envelope. Key tracking is later. Planned later on the same recipe: pulse width, dual-oscillator mix, a learning look at Moog-style ladder filters, and a possible reevaluation of heavier band-limited oscillators. Wavetable remains a separate future engine.
+
+**Filter and assignable envelopes**
+Three ADSRs per voice. Amp owns voice lifetime. Cutoff uses exponential signed-octave modulation; stacking adds octave offsets. Assignable dests are off, resonance, pitch, and cutoff. Times are independent. `envcopy` snapshots amp times onto the other two. `envlink` snaps then follows amp time commands; a filtenv* or env3* time command unlinks. Shared `envvel` defaults to 0; split fvel/e3vel later if needed. Key tracking is not in this slice.
 
 **Terminal param control for laptop development**
-While developing without a MIDI device, the laptop hosts (via `host-common`) change engine params via named line commands (cutoff in Hz, resonance and sustain in 0–1, ADSR times in milliseconds, wave select). Real MIDI CC from the Polyend or other devices are a later session. High-rate knobs/CC may later use atomics plus smoothing; discrete commands and note events use the SPSC queue now.
+While developing without a MIDI device, the laptop hosts (via `host-common`) change engine params via named line commands (cutoff in Hz, resonance and sustain in 0–1, ADSR times in milliseconds, wave select, filtenvamt, filtenv* times, env3dest, env3amt, env3* times, envcopy, envlink, envvel). Real MIDI CC from the Polyend or other devices are a later session. High-rate knobs/CC may later use atomics plus smoothing; discrete commands and note events use the SPSC queue now.
 
 **Multitimbral routing with per-engine volume**
 Incoming MIDI is routed by channel to a matching engine instance; engine outputs are summed into one mix. Each instance's volume (gain) is adjustable live via MIDI CC now, and physical knobs later. Longer term: configurable channel → instance mapping, including several instances of the same recipe with independent params (filter, ADSR, etc.). Not built yet.
 
 **Per-engine fixed polyphony**
-Each engine has a fixed set of 4 voices (tunable after measuring the Daisy). Note-off starts amp release; a voice frees when the envelope finishes. When stealing, prefer voices already in release (oldest among those), else the oldest voice overall. Note number → Hz lives in the engine. Voices use a fixed low per-voice gain, velocity curve, and are summed (no divide-by-voice-count). A shared voice pool may come later if channels starve each other.
+Each engine has a fixed set of 4 voices (tunable after measuring the Daisy). Note-off starts amp release; a voice frees when the amp envelope finishes. When stealing, prefer voices already in release (oldest among those), else the oldest voice overall. Note number → Hz lives in the engine. Voices use a fixed low per-voice gain, velocity curve, and are summed (no divide-by-voice-count). A shared voice pool may come later if channels starve each other.
 
 **Laptop MIDI and keyboard input**
 Shared host plumbing opens a midir input when available: auto-select if there is exactly one port, otherwise list ports and pick by number. Note on/off feed the engine. If no MIDI port exists, a crossterm one-octave laptop-keyboard fallback (from C4, fixed velocity) pushes the same events. Param line commands work in both paths. This development slice listens on all MIDI channels with a single engine instance. Under WSL, terminal key release is not available, so keyboard-fallback notes rely on amp release and voice stealing. On native Windows (`host-windows`), the console reports key-up so hold-to-play works.

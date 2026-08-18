@@ -1,4 +1,4 @@
-/// Amp envelope stage. Idle means the voice is silent and free.
+/// Envelope stage. For the amp envelope, Idle means the voice is silent and free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvelopeStage {
     Idle,
@@ -8,7 +8,7 @@ pub enum EnvelopeStage {
     Release,
 }
 
-/// Exponential-ish ADSR for amplitude.
+/// Exponential-ish ADSR (0..1) used for amp, filter, and assignable envelopes.
 ///
 /// Times are stored as per-sample coefficients derived from milliseconds.
 /// Sustain is a level in 0..1 held until note-off.
@@ -78,7 +78,7 @@ impl Adsr {
         }
     }
 
-    /// Advances one sample and returns the current amp level in 0..1.
+    /// Advances one sample and returns the current level in 0..1.
     pub fn next_level(&mut self) -> f32 {
         match self.stage {
             EnvelopeStage::Idle => {
@@ -110,6 +110,42 @@ impl Adsr {
             }
         }
         self.level
+    }
+}
+
+/// Attack, decay, sustain, and release for one ADSR (amp, filter, or assignable).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdsrTimes {
+    pub attack_ms: f32,
+    pub decay_ms: f32,
+    pub sustain: f32,
+    pub release_ms: f32,
+}
+
+impl Default for AdsrTimes {
+    fn default() -> Self {
+        Self {
+            attack_ms: 10.0,
+            decay_ms: 100.0,
+            sustain: 0.7,
+            release_ms: 200.0,
+        }
+    }
+}
+
+impl AdsrTimes {
+    pub(crate) fn clamped(self) -> Self {
+        Self {
+            attack_ms: self.attack_ms.max(0.0),
+            decay_ms: self.decay_ms.max(0.0),
+            sustain: self.sustain.clamp(0.0, 1.0),
+            release_ms: self.release_ms.max(0.0),
+        }
+    }
+
+    pub(crate) fn apply_to(self, adsr: &mut Adsr) {
+        adsr.set_times_ms(self.attack_ms, self.decay_ms, self.release_ms);
+        adsr.set_sustain(self.sustain);
     }
 }
 

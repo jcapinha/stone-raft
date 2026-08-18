@@ -22,8 +22,14 @@ impl Svf {
         self.ic2eq = 0.0;
     }
 
-    /// Processes one sample. `cutoff_hz` and `resonance` come from shared engine params.
-    pub fn process(&mut self, input: f32, sample_rate_hz: f32, cutoff_hz: f32, resonance: f32) -> f32 {
+    /// Processes one sample. `cutoff_hz` and `resonance` are per-sample values (params plus envelope modulation).
+    pub fn process(
+        &mut self,
+        input: f32,
+        sample_rate_hz: f32,
+        cutoff_hz: f32,
+        resonance: f32,
+    ) -> f32 {
         let nyquist = sample_rate_hz * 0.5;
         let cutoff = cutoff_hz.clamp(20.0, nyquist * 0.99);
         let res = resonance.clamp(0.0, 1.0);
