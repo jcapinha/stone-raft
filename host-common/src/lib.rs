@@ -10,7 +10,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, FromSample, SizedSample};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use engine::{Engine, Env3Dest, EnvelopeId, Waveform};
+use engine::{AdsrTimes, ControlEvent, Engine, Env3Dest, EnvelopeField, EnvelopeId, Waveform};
 use midir::{MidiInput, MidiInputConnection, MidiInputPort};
 use rand::Rng;
 use rtrb::{Producer, RingBuffer};
@@ -38,44 +38,9 @@ const RANDOM_ENV3_DESTS: [Env3Dest; 4] = [
     Env3Dest::Cutoff,
 ];
 
-#[derive(Debug, Clone, Copy)]
-enum ControlEvent {
-    NoteOn { note: u8, velocity: u8 },
-    NoteOff { note: u8 },
-    SetCutoff { hz: f32 },
-    SetResonance { amount: f32 },
-    SetAttack { ms: f32 },
-    SetDecay { ms: f32 },
-    SetSustain { level: f32 },
-    SetRelease { ms: f32 },
-    SetWave { waveform: Waveform },
-    SetFiltEnvAmt { amount: f32 },
-    SetFiltEnvAttack { ms: f32 },
-    SetFiltEnvDecay { ms: f32 },
-    SetFiltEnvSustain { level: f32 },
-    SetFiltEnvRelease { ms: f32 },
-    SetEnv3Dest { dest: Env3Dest },
-    SetEnv3Amt { amount: f32 },
-    SetEnv3Attack { ms: f32 },
-    SetEnv3Decay { ms: f32 },
-    SetEnv3Sustain { level: f32 },
-    SetEnv3Release { ms: f32 },
-    EnvCopy,
-    SetEnvLink { on: bool },
-    SetEnvVel { amount: f32 },
-}
-
 struct ParamCommand {
     events: Vec<ControlEvent>,
     report: Option<String>,
-}
-
-#[derive(Clone, Copy)]
-struct RandomAdsr {
-    attack_ms: f32,
-    decay_ms: f32,
-    sustain: f32,
-    release_ms: f32,
 }
 
 /// Opens audio and MIDI (or keyboard fallback) and runs until the user quits.
@@ -171,7 +136,7 @@ where
         config,
         move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
             while let Ok(event) = consumer.pop() {
-                apply_event(&mut engine, event);
+                engine.apply(event);
             }
 
             for frame in data.chunks_mut(channels) {
@@ -187,58 +152,6 @@ where
     )?;
 
     Ok(stream)
-}
-
-fn apply_event(engine: &mut Engine, event: ControlEvent) {
-    match event {
-        ControlEvent::NoteOn { note, velocity } => engine.note_on(note, velocity),
-        ControlEvent::NoteOff { note } => engine.note_off(note),
-        ControlEvent::SetCutoff { hz } => engine.set_cutoff_hz(hz),
-        ControlEvent::SetResonance { amount } => engine.set_resonance(amount),
-        ControlEvent::SetAttack { ms } => {
-            engine.patch_envelope(EnvelopeId::Amp, |times| times.attack_ms = ms)
-        }
-        ControlEvent::SetDecay { ms } => {
-            engine.patch_envelope(EnvelopeId::Amp, |times| times.decay_ms = ms)
-        }
-        ControlEvent::SetSustain { level } => {
-            engine.patch_envelope(EnvelopeId::Amp, |times| times.sustain = level)
-        }
-        ControlEvent::SetRelease { ms } => {
-            engine.patch_envelope(EnvelopeId::Amp, |times| times.release_ms = ms)
-        }
-        ControlEvent::SetWave { waveform } => engine.set_waveform(waveform),
-        ControlEvent::SetFiltEnvAmt { amount } => engine.set_filtenv_amt(amount),
-        ControlEvent::SetFiltEnvAttack { ms } => {
-            engine.patch_envelope(EnvelopeId::Filter, |times| times.attack_ms = ms)
-        }
-        ControlEvent::SetFiltEnvDecay { ms } => {
-            engine.patch_envelope(EnvelopeId::Filter, |times| times.decay_ms = ms)
-        }
-        ControlEvent::SetFiltEnvSustain { level } => {
-            engine.patch_envelope(EnvelopeId::Filter, |times| times.sustain = level)
-        }
-        ControlEvent::SetFiltEnvRelease { ms } => {
-            engine.patch_envelope(EnvelopeId::Filter, |times| times.release_ms = ms)
-        }
-        ControlEvent::SetEnv3Dest { dest } => engine.set_env3_dest(dest),
-        ControlEvent::SetEnv3Amt { amount } => engine.set_env3_amt(amount),
-        ControlEvent::SetEnv3Attack { ms } => {
-            engine.patch_envelope(EnvelopeId::Assignable, |times| times.attack_ms = ms)
-        }
-        ControlEvent::SetEnv3Decay { ms } => {
-            engine.patch_envelope(EnvelopeId::Assignable, |times| times.decay_ms = ms)
-        }
-        ControlEvent::SetEnv3Sustain { level } => {
-            engine.patch_envelope(EnvelopeId::Assignable, |times| times.sustain = level)
-        }
-        ControlEvent::SetEnv3Release { ms } => {
-            engine.patch_envelope(EnvelopeId::Assignable, |times| times.release_ms = ms)
-        }
-        ControlEvent::EnvCopy => engine.env_copy(),
-        ControlEvent::SetEnvLink { on } => engine.set_env_link(on),
-        ControlEvent::SetEnvVel { amount } => engine.set_envvel(amount),
-    }
 }
 
 fn push_event(producer: &Arc<Mutex<Producer<ControlEvent>>>, event: ControlEvent) {
@@ -503,8 +416,8 @@ fn log_uniform<R: Rng>(rng: &mut R, min: f32, max: f32) -> f32 {
     rng.gen_range(log_min..=log_max).exp().clamp(min, max)
 }
 
-fn random_adsr<R: Rng>(rng: &mut R) -> RandomAdsr {
-    RandomAdsr {
+fn random_adsr<R: Rng>(rng: &mut R) -> AdsrTimes {
+    AdsrTimes {
         attack_ms: log_uniform(rng, RANDOM_TIME_MIN_MS, RANDOM_TIME_MAX_MS),
         decay_ms: log_uniform(rng, RANDOM_TIME_MIN_MS, RANDOM_TIME_MAX_MS),
         sustain: rng.gen_range(0.0..=1.0),
@@ -588,10 +501,10 @@ fn generate_random_patch<R: Rng>(rng: &mut R) -> ParamCommand {
         ControlEvent::SetWave { waveform },
         ControlEvent::SetCutoff { hz: cutoff_hz },
         ControlEvent::SetResonance { amount: resonance },
-        ControlEvent::SetAttack { ms: amp.attack_ms },
-        ControlEvent::SetDecay { ms: amp.decay_ms },
-        ControlEvent::SetSustain { level: amp.sustain },
-        ControlEvent::SetRelease { ms: amp.release_ms },
+        ControlEvent::SetEnvelope {
+            which: EnvelopeId::Amp,
+            times: amp,
+        },
         ControlEvent::SetFiltEnvAmt {
             amount: filtenv_amt,
         },
@@ -604,29 +517,13 @@ fn generate_random_patch<R: Rng>(rng: &mut R) -> ParamCommand {
         events.push(ControlEvent::SetEnvLink { on: true });
     } else {
         events.push(ControlEvent::SetEnvLink { on: false });
-        events.push(ControlEvent::SetFiltEnvAttack {
-            ms: filter_env.attack_ms,
+        events.push(ControlEvent::SetEnvelope {
+            which: EnvelopeId::Filter,
+            times: filter_env,
         });
-        events.push(ControlEvent::SetFiltEnvDecay {
-            ms: filter_env.decay_ms,
-        });
-        events.push(ControlEvent::SetFiltEnvSustain {
-            level: filter_env.sustain,
-        });
-        events.push(ControlEvent::SetFiltEnvRelease {
-            ms: filter_env.release_ms,
-        });
-        events.push(ControlEvent::SetEnv3Attack {
-            ms: assign_env.attack_ms,
-        });
-        events.push(ControlEvent::SetEnv3Decay {
-            ms: assign_env.decay_ms,
-        });
-        events.push(ControlEvent::SetEnv3Sustain {
-            level: assign_env.sustain,
-        });
-        events.push(ControlEvent::SetEnv3Release {
-            ms: assign_env.release_ms,
+        events.push(ControlEvent::SetEnvelope {
+            which: EnvelopeId::Assignable,
+            times: assign_env,
         });
     }
 
@@ -661,22 +558,10 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             let amount = parse_f32_arg(arg, "res")?;
             Ok(Some(ControlEvent::SetResonance { amount }))
         }
-        "attack" => {
-            let ms = parse_f32_arg(arg, "attack")?;
-            Ok(Some(ControlEvent::SetAttack { ms }))
-        }
-        "decay" => {
-            let ms = parse_f32_arg(arg, "decay")?;
-            Ok(Some(ControlEvent::SetDecay { ms }))
-        }
-        "sustain" => {
-            let level = parse_f32_arg(arg, "sustain")?;
-            Ok(Some(ControlEvent::SetSustain { level }))
-        }
-        "release" => {
-            let ms = parse_f32_arg(arg, "release")?;
-            Ok(Some(ControlEvent::SetRelease { ms }))
-        }
+        "attack" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Attack, arg, "attack"),
+        "decay" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Decay, arg, "decay"),
+        "sustain" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Sustain, arg, "sustain"),
+        "release" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Release, arg, "release"),
         "wave" => {
             let name = arg.ok_or_else(|| "wave needs saw or square".to_string())?;
             let waveform = match name.to_ascii_lowercase().as_str() {
@@ -690,22 +575,30 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             let amount = parse_f32_arg(arg, "filtenvamt")?;
             Ok(Some(ControlEvent::SetFiltEnvAmt { amount }))
         }
-        "filtenvattack" => {
-            let ms = parse_f32_arg(arg, "filtenvattack")?;
-            Ok(Some(ControlEvent::SetFiltEnvAttack { ms }))
-        }
-        "filtenvdecay" => {
-            let ms = parse_f32_arg(arg, "filtenvdecay")?;
-            Ok(Some(ControlEvent::SetFiltEnvDecay { ms }))
-        }
-        "filtenvsustain" => {
-            let level = parse_f32_arg(arg, "filtenvsustain")?;
-            Ok(Some(ControlEvent::SetFiltEnvSustain { level }))
-        }
-        "filtenvrelease" => {
-            let ms = parse_f32_arg(arg, "filtenvrelease")?;
-            Ok(Some(ControlEvent::SetFiltEnvRelease { ms }))
-        }
+        "filtenvattack" => envelope_patch(
+            EnvelopeId::Filter,
+            EnvelopeField::Attack,
+            arg,
+            "filtenvattack",
+        ),
+        "filtenvdecay" => envelope_patch(
+            EnvelopeId::Filter,
+            EnvelopeField::Decay,
+            arg,
+            "filtenvdecay",
+        ),
+        "filtenvsustain" => envelope_patch(
+            EnvelopeId::Filter,
+            EnvelopeField::Sustain,
+            arg,
+            "filtenvsustain",
+        ),
+        "filtenvrelease" => envelope_patch(
+            EnvelopeId::Filter,
+            EnvelopeField::Release,
+            arg,
+            "filtenvrelease",
+        ),
         "env3dest" => {
             let name =
                 arg.ok_or_else(|| "env3dest needs off, res, pitch, or cutoff".to_string())?;
@@ -726,22 +619,30 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             let amount = parse_f32_arg(arg, "env3amt")?;
             Ok(Some(ControlEvent::SetEnv3Amt { amount }))
         }
-        "env3attack" => {
-            let ms = parse_f32_arg(arg, "env3attack")?;
-            Ok(Some(ControlEvent::SetEnv3Attack { ms }))
-        }
-        "env3decay" => {
-            let ms = parse_f32_arg(arg, "env3decay")?;
-            Ok(Some(ControlEvent::SetEnv3Decay { ms }))
-        }
-        "env3sustain" => {
-            let level = parse_f32_arg(arg, "env3sustain")?;
-            Ok(Some(ControlEvent::SetEnv3Sustain { level }))
-        }
-        "env3release" => {
-            let ms = parse_f32_arg(arg, "env3release")?;
-            Ok(Some(ControlEvent::SetEnv3Release { ms }))
-        }
+        "env3attack" => envelope_patch(
+            EnvelopeId::Assignable,
+            EnvelopeField::Attack,
+            arg,
+            "env3attack",
+        ),
+        "env3decay" => envelope_patch(
+            EnvelopeId::Assignable,
+            EnvelopeField::Decay,
+            arg,
+            "env3decay",
+        ),
+        "env3sustain" => envelope_patch(
+            EnvelopeId::Assignable,
+            EnvelopeField::Sustain,
+            arg,
+            "env3sustain",
+        ),
+        "env3release" => envelope_patch(
+            EnvelopeId::Assignable,
+            EnvelopeField::Release,
+            arg,
+            "env3release",
+        ),
         "envcopy" => {
             if arg.is_some() {
                 return Err("too many arguments".to_string());
@@ -767,6 +668,20 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
     }
 }
 
+fn envelope_patch(
+    which: EnvelopeId,
+    field: EnvelopeField,
+    arg: Option<&str>,
+    name: &str,
+) -> Result<Option<ControlEvent>, String> {
+    let value = parse_f32_arg(arg, name)?;
+    Ok(Some(ControlEvent::PatchEnvelope {
+        which,
+        field,
+        value,
+    }))
+}
+
 fn parse_f32_arg(arg: Option<&str>, name: &str) -> Result<f32, String> {
     let raw = arg.ok_or_else(|| format!("{name} needs a number"))?;
     raw.parse::<f32>()
@@ -788,6 +703,34 @@ mod tests {
             Some(ControlEvent::SetWave {
                 waveform: Waveform::Square,
             }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_envelope_time_commands_as_patches() {
+        match parse_param_command("attack 12").unwrap() {
+            Some(ControlEvent::PatchEnvelope {
+                which: EnvelopeId::Amp,
+                field: EnvelopeField::Attack,
+                value,
+            }) => assert!((value - 12.0).abs() < f32::EPSILON),
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("filtenvattack 50").unwrap() {
+            Some(ControlEvent::PatchEnvelope {
+                which: EnvelopeId::Filter,
+                field: EnvelopeField::Attack,
+                value,
+            }) => assert!((value - 50.0).abs() < f32::EPSILON),
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("env3decay 80").unwrap() {
+            Some(ControlEvent::PatchEnvelope {
+                which: EnvelopeId::Assignable,
+                field: EnvelopeField::Decay,
+                value,
+            }) => assert!((value - 80.0).abs() < f32::EPSILON),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -909,28 +852,27 @@ mod tests {
                     ControlEvent::SetResonance { amount } => {
                         assert!(*amount >= 0.0 && *amount <= RANDOM_RES_MAX);
                     }
-                    ControlEvent::SetAttack { ms }
-                    | ControlEvent::SetDecay { ms }
-                    | ControlEvent::SetRelease { ms } => {
-                        assert!(*ms >= RANDOM_TIME_MIN_MS && *ms <= RANDOM_TIME_MAX_MS);
+                    ControlEvent::SetEnvelope { which, times } => {
+                        assert!(
+                            times.attack_ms >= RANDOM_TIME_MIN_MS
+                                && times.attack_ms <= RANDOM_TIME_MAX_MS
+                        );
+                        assert!(
+                            times.decay_ms >= RANDOM_TIME_MIN_MS
+                                && times.decay_ms <= RANDOM_TIME_MAX_MS
+                        );
+                        assert!(
+                            times.release_ms >= RANDOM_TIME_MIN_MS
+                                && times.release_ms <= RANDOM_TIME_MAX_MS
+                        );
+                        assert!(times.sustain >= 0.0 && times.sustain <= 1.0);
+                        match which {
+                            EnvelopeId::Amp => {}
+                            EnvelopeId::Filter | EnvelopeId::Assignable => extra_env_times += 1,
+                        }
                     }
-                    ControlEvent::SetFiltEnvAttack { ms }
-                    | ControlEvent::SetFiltEnvDecay { ms }
-                    | ControlEvent::SetFiltEnvRelease { ms }
-                    | ControlEvent::SetEnv3Attack { ms }
-                    | ControlEvent::SetEnv3Decay { ms }
-                    | ControlEvent::SetEnv3Release { ms } => {
-                        extra_env_times += 1;
-                        assert!(*ms >= RANDOM_TIME_MIN_MS && *ms <= RANDOM_TIME_MAX_MS);
-                    }
-                    ControlEvent::SetSustain { level }
-                    | ControlEvent::SetEnvVel { amount: level } => {
-                        assert!(*level >= 0.0 && *level <= 1.0);
-                    }
-                    ControlEvent::SetFiltEnvSustain { level }
-                    | ControlEvent::SetEnv3Sustain { level } => {
-                        extra_env_times += 1;
-                        assert!(*level >= 0.0 && *level <= 1.0);
+                    ControlEvent::SetEnvVel { amount } => {
+                        assert!(*amount >= 0.0 && *amount <= 1.0);
                     }
                     ControlEvent::SetFiltEnvAmt { amount } => {
                         assert!(*amount >= RANDOM_AMT_MIN && *amount <= RANDOM_AMT_MAX);
@@ -949,7 +891,8 @@ mod tests {
                     ControlEvent::SetWave { .. }
                     | ControlEvent::NoteOn { .. }
                     | ControlEvent::NoteOff { .. }
-                    | ControlEvent::EnvCopy => {}
+                    | ControlEvent::EnvCopy
+                    | ControlEvent::PatchEnvelope { .. } => {}
                 }
             }
 
@@ -964,8 +907,8 @@ mod tests {
                 );
             } else {
                 assert_eq!(
-                    extra_env_times, 8,
-                    "seed {seed}: unlinked patch should set filter and env3 times"
+                    extra_env_times, 2,
+                    "seed {seed}: unlinked patch should set filter and assignable times"
                 );
             }
         }

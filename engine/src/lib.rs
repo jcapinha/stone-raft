@@ -38,6 +38,61 @@ pub enum EnvelopeId {
     Assignable,
 }
 
+/// One ADSR time or sustain field, used with [`ControlEvent::PatchEnvelope`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopeField {
+    Attack,
+    Decay,
+    Sustain,
+    Release,
+}
+
+/// Discrete notes and param changes. Hosts enqueue these; only the audio thread calls [`Engine::apply`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ControlEvent {
+    NoteOn {
+        note: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        note: u8,
+    },
+    SetCutoff {
+        hz: f32,
+    },
+    SetResonance {
+        amount: f32,
+    },
+    SetWave {
+        waveform: Waveform,
+    },
+    SetEnvelope {
+        which: EnvelopeId,
+        times: AdsrTimes,
+    },
+    PatchEnvelope {
+        which: EnvelopeId,
+        field: EnvelopeField,
+        value: f32,
+    },
+    SetFiltEnvAmt {
+        amount: f32,
+    },
+    SetEnv3Dest {
+        dest: Env3Dest,
+    },
+    SetEnv3Amt {
+        amount: f32,
+    },
+    EnvCopy,
+    SetEnvLink {
+        on: bool,
+    },
+    SetEnvVel {
+        amount: f32,
+    },
+}
+
 /// Converts a MIDI note number to frequency in Hz (A4 = 69 = 440 Hz).
 pub fn midi_note_to_hz(note: u8) -> f32 {
     let semitones_from_a4 = f32::from(note) - 69.0;
@@ -162,23 +217,51 @@ impl Engine {
         &self.params
     }
 
-    pub fn set_waveform(&mut self, waveform: Waveform) {
+    /// Applies one note or param change. Call only from the audio thread.
+    pub fn apply(&mut self, event: ControlEvent) {
+        match event {
+            ControlEvent::NoteOn { note, velocity } => self.note_on(note, velocity),
+            ControlEvent::NoteOff { note } => self.note_off(note),
+            ControlEvent::SetCutoff { hz } => self.set_cutoff_hz(hz),
+            ControlEvent::SetResonance { amount } => self.set_resonance(amount),
+            ControlEvent::SetWave { waveform } => self.set_waveform(waveform),
+            ControlEvent::SetEnvelope { which, times } => self.set_envelope(which, times),
+            ControlEvent::PatchEnvelope {
+                which,
+                field,
+                value,
+            } => self.patch_envelope(which, |times| match field {
+                EnvelopeField::Attack => times.attack_ms = value,
+                EnvelopeField::Decay => times.decay_ms = value,
+                EnvelopeField::Sustain => times.sustain = value,
+                EnvelopeField::Release => times.release_ms = value,
+            }),
+            ControlEvent::SetFiltEnvAmt { amount } => self.set_filtenv_amt(amount),
+            ControlEvent::SetEnv3Dest { dest } => self.set_env3_dest(dest),
+            ControlEvent::SetEnv3Amt { amount } => self.set_env3_amt(amount),
+            ControlEvent::EnvCopy => self.env_copy(),
+            ControlEvent::SetEnvLink { on } => self.set_env_link(on),
+            ControlEvent::SetEnvVel { amount } => self.set_envvel(amount),
+        }
+    }
+
+    fn set_waveform(&mut self, waveform: Waveform) {
         self.params.waveform = waveform;
         for voice in self.voices.iter_mut() {
             voice.oscillator.set_waveform(waveform);
         }
     }
 
-    pub fn set_cutoff_hz(&mut self, cutoff_hz: f32) {
+    fn set_cutoff_hz(&mut self, cutoff_hz: f32) {
         self.params.cutoff_hz = cutoff_hz.max(20.0);
     }
 
-    pub fn set_resonance(&mut self, resonance: f32) {
+    fn set_resonance(&mut self, resonance: f32) {
         self.params.resonance = resonance.clamp(0.0, 1.0);
     }
 
     /// Sets ADSR times for one envelope. Amp follows envelope link. Filter or assignable unlinks.
-    pub fn set_envelope(&mut self, which: EnvelopeId, times: AdsrTimes) {
+    fn set_envelope(&mut self, which: EnvelopeId, times: AdsrTimes) {
         let times = times.clamped();
         match which {
             EnvelopeId::Amp => {
@@ -200,37 +283,36 @@ impl Engine {
         self.apply_envelope_params_to_all();
     }
 
-    /// Changes one envelope's times in place. Amp follows envelope link. Filter or assignable unlinks.
-    pub fn patch_envelope(&mut self, which: EnvelopeId, patch: impl FnOnce(&mut AdsrTimes)) {
+    fn patch_envelope(&mut self, which: EnvelopeId, patch: impl FnOnce(&mut AdsrTimes)) {
         let mut times = self.params.envelope(which);
         patch(&mut times);
         self.set_envelope(which, times);
     }
 
-    pub fn set_filtenv_amt(&mut self, amount: f32) {
+    fn set_filtenv_amt(&mut self, amount: f32) {
         self.params.filtenv_amt = amount.clamp(AMT_MIN, AMT_MAX);
     }
 
-    pub fn set_env3_dest(&mut self, dest: Env3Dest) {
+    fn set_env3_dest(&mut self, dest: Env3Dest) {
         self.params.env3_dest = dest;
     }
 
-    pub fn set_env3_amt(&mut self, amount: f32) {
+    fn set_env3_amt(&mut self, amount: f32) {
         self.params.env3_amt = amount.clamp(AMT_MIN, AMT_MAX);
     }
 
-    pub fn env_copy(&mut self) {
+    fn env_copy(&mut self) {
         self.copy_amp_times_to_extra_envelopes();
     }
 
-    pub fn set_env_link(&mut self, on: bool) {
+    fn set_env_link(&mut self, on: bool) {
         self.params.env_link = on;
         if on {
             self.copy_amp_times_to_extra_envelopes();
         }
     }
 
-    pub fn set_envvel(&mut self, amount: f32) {
+    fn set_envvel(&mut self, amount: f32) {
         self.params.envvel = amount.clamp(0.0, 1.0);
     }
 
@@ -253,7 +335,7 @@ impl Engine {
         }
     }
 
-    pub fn note_on(&mut self, note: u8, velocity: u8) {
+    fn note_on(&mut self, note: u8, velocity: u8) {
         if velocity == 0 {
             self.note_off(note);
             return;
@@ -280,7 +362,7 @@ impl Engine {
         self.start_voice(index, note, velocity, age);
     }
 
-    pub fn note_off(&mut self, note: u8) {
+    fn note_off(&mut self, note: u8) {
         for voice in self.voices.iter_mut() {
             if voice.is_active() && voice.note == note {
                 voice.amp.note_off();
@@ -413,28 +495,60 @@ mod tests {
         samples.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()))
     }
 
-    fn set_fast_amp_sustain(engine: &mut Engine) {
-        engine.patch_envelope(EnvelopeId::Amp, |times| {
-            times.attack_ms = 1.0;
-            times.decay_ms = 1.0;
-            times.sustain = 1.0;
+    fn note_on(engine: &mut Engine, note: u8, velocity: u8) {
+        engine.apply(ControlEvent::NoteOn { note, velocity });
+    }
+
+    fn note_off(engine: &mut Engine, note: u8) {
+        engine.apply(ControlEvent::NoteOff { note });
+    }
+
+    fn set_wave(engine: &mut Engine, waveform: Waveform) {
+        engine.apply(ControlEvent::SetWave { waveform });
+    }
+
+    fn set_cutoff(engine: &mut Engine, hz: f32) {
+        engine.apply(ControlEvent::SetCutoff { hz });
+    }
+
+    fn set_res(engine: &mut Engine, amount: f32) {
+        engine.apply(ControlEvent::SetResonance { amount });
+    }
+
+    fn set_envelope(engine: &mut Engine, which: EnvelopeId, times: AdsrTimes) {
+        engine.apply(ControlEvent::SetEnvelope { which, times });
+    }
+
+    fn patch_field(engine: &mut Engine, which: EnvelopeId, field: EnvelopeField, value: f32) {
+        engine.apply(ControlEvent::PatchEnvelope {
+            which,
+            field,
+            value,
         });
+    }
+
+    fn set_fast_amp_sustain(engine: &mut Engine) {
+        let mut times = engine.params().amp;
+        times.attack_ms = 1.0;
+        times.decay_ms = 1.0;
+        times.sustain = 1.0;
+        set_envelope(engine, EnvelopeId::Amp, times);
     }
 
     fn set_fast_filter_env_sustain(engine: &mut Engine) {
-        engine.patch_envelope(EnvelopeId::Filter, |times| {
-            times.attack_ms = 1.0;
-            times.decay_ms = 1.0;
-            times.sustain = 1.0;
-        });
+        let mut times = engine.params().filter_env;
+        times.attack_ms = 1.0;
+        times.decay_ms = 1.0;
+        times.sustain = 1.0;
+        set_envelope(engine, EnvelopeId::Filter, times);
     }
 
     fn set_fast_assign_env_sustain(engine: &mut Engine) {
-        engine.patch_envelope(EnvelopeId::Assignable, |times| {
-            times.attack_ms = 1.0;
-            times.decay_ms = 1.0;
-            times.sustain = 1.0;
-        });
+        let mut times = engine.params().assign_env;
+        times.attack_ms = 1.0;
+        times.decay_ms = 1.0;
+        times.sustain = 1.0;
+        set_envelope(engine, EnvelopeId::Assignable, times);
     }
 
     #[test]
@@ -488,17 +602,17 @@ mod tests {
         // Square wave at 220 Hz; measure energy near the 5th harmonic (~1100 Hz).
         let mut dark = Engine::new(SAMPLE_RATE_HZ);
         let mut bright = Engine::new(SAMPLE_RATE_HZ);
-        dark.set_waveform(Waveform::Square);
-        bright.set_waveform(Waveform::Square);
-        dark.set_cutoff_hz(400.0);
-        bright.set_cutoff_hz(8_000.0);
-        dark.set_resonance(0.0);
-        bright.set_resonance(0.0);
+        set_wave(&mut dark, Waveform::Square);
+        set_wave(&mut bright, Waveform::Square);
+        set_cutoff(&mut dark, 400.0);
+        set_cutoff(&mut bright, 8_000.0);
+        set_res(&mut dark, 0.0);
+        set_res(&mut bright, 0.0);
         set_fast_amp_sustain(&mut dark);
         set_fast_amp_sustain(&mut bright);
 
-        dark.note_on(57, 127); // A3 ≈ 220 Hz
-        bright.note_on(57, 127);
+        note_on(&mut dark, 57, 127); // A3 ≈ 220 Hz
+        note_on(&mut bright, 57, 127);
         // Skip attack
         for _ in 0..2_000 {
             dark.next_sample();
@@ -518,7 +632,8 @@ mod tests {
     #[test]
     fn note_off_fades_instead_of_hard_cut() {
         let mut engine = Engine::new(SAMPLE_RATE_HZ);
-        engine.set_envelope(
+        set_envelope(
+            &mut engine,
             EnvelopeId::Amp,
             AdsrTimes {
                 attack_ms: 1.0,
@@ -527,11 +642,11 @@ mod tests {
                 release_ms: 50.0,
             },
         );
-        engine.note_on(60, 127);
+        note_on(&mut engine, 60, 127);
         for _ in 0..2_000 {
             engine.next_sample();
         }
-        engine.note_off(60);
+        note_off(&mut engine, 60);
 
         let mut first_release_peak = 0.0f32;
         for _ in 0..100 {
@@ -559,7 +674,8 @@ mod tests {
     #[test]
     fn fifth_note_prefers_stealing_releasing_voice() {
         let mut engine = Engine::new(SAMPLE_RATE_HZ);
-        engine.set_envelope(
+        set_envelope(
+            &mut engine,
             EnvelopeId::Amp,
             AdsrTimes {
                 attack_ms: 1.0,
@@ -569,16 +685,16 @@ mod tests {
             },
         );
 
-        engine.note_on(60, 127);
-        engine.note_on(62, 127);
-        engine.note_on(64, 127);
-        engine.note_on(65, 127);
+        note_on(&mut engine, 60, 127);
+        note_on(&mut engine, 62, 127);
+        note_on(&mut engine, 64, 127);
+        note_on(&mut engine, 65, 127);
         // Put the oldest note into release so it should be stolen first.
-        engine.note_off(60);
+        note_off(&mut engine, 60);
         for _ in 0..100 {
             engine.next_sample();
         }
-        engine.note_on(67, 127);
+        note_on(&mut engine, 67, 127);
 
         let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
         assert!(
@@ -600,10 +716,10 @@ mod tests {
         let mut loud = Engine::new(SAMPLE_RATE_HZ);
         for engine in [&mut quiet, &mut loud] {
             set_fast_amp_sustain(engine);
-            engine.set_cutoff_hz(8_000.0);
+            set_cutoff(engine, 8_000.0);
         }
-        quiet.note_on(60, 40);
-        loud.note_on(60, 127);
+        note_on(&mut quiet, 60, 40);
+        note_on(&mut loud, 60, 127);
 
         for _ in 0..2_000 {
             quiet.next_sample();
@@ -633,13 +749,13 @@ mod tests {
         let mut square = Engine::new(SAMPLE_RATE_HZ);
         for engine in [&mut saw, &mut square] {
             set_fast_amp_sustain(engine);
-            engine.set_cutoff_hz(10_000.0);
-            engine.set_resonance(0.0);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
         }
-        saw.set_waveform(Waveform::Saw);
-        square.set_waveform(Waveform::Square);
-        saw.note_on(48, 127);
-        square.note_on(48, 127);
+        set_wave(&mut saw, Waveform::Saw);
+        set_wave(&mut square, Waveform::Square);
+        note_on(&mut saw, 48, 127);
+        note_on(&mut square, 48, 127);
         for _ in 0..2_000 {
             saw.next_sample();
             square.next_sample();
@@ -671,17 +787,17 @@ mod tests {
         let mut closed = Engine::new(SAMPLE_RATE_HZ);
         let mut opened = Engine::new(SAMPLE_RATE_HZ);
         for engine in [&mut closed, &mut opened] {
-            engine.set_waveform(Waveform::Square);
-            engine.set_cutoff_hz(400.0);
-            engine.set_resonance(0.0);
+            set_wave(engine, Waveform::Square);
+            set_cutoff(engine, 400.0);
+            set_res(engine, 0.0);
             set_fast_amp_sustain(engine);
             set_fast_filter_env_sustain(engine);
         }
-        closed.set_filtenv_amt(0.0);
-        opened.set_filtenv_amt(4.0);
+        closed.apply(ControlEvent::SetFiltEnvAmt { amount: 0.0 });
+        opened.apply(ControlEvent::SetFiltEnvAmt { amount: 4.0 });
 
-        closed.note_on(57, 127);
-        opened.note_on(57, 127);
+        note_on(&mut closed, 57, 127);
+        note_on(&mut opened, 57, 127);
         for _ in 0..2_000 {
             closed.next_sample();
             opened.next_sample();
@@ -702,21 +818,23 @@ mod tests {
         let mut stacked = Engine::new(SAMPLE_RATE_HZ);
         let mut combined = Engine::new(SAMPLE_RATE_HZ);
         for engine in [&mut stacked, &mut combined] {
-            engine.set_waveform(Waveform::Square);
-            engine.set_cutoff_hz(400.0);
-            engine.set_resonance(0.0);
+            set_wave(engine, Waveform::Square);
+            set_cutoff(engine, 400.0);
+            set_res(engine, 0.0);
             set_fast_amp_sustain(engine);
             set_fast_filter_env_sustain(engine);
             set_fast_assign_env_sustain(engine);
         }
-        stacked.set_env3_dest(Env3Dest::Cutoff);
-        stacked.set_filtenv_amt(2.0);
-        stacked.set_env3_amt(2.0);
-        combined.set_filtenv_amt(4.0);
-        combined.set_env3_amt(0.0);
+        stacked.apply(ControlEvent::SetEnv3Dest {
+            dest: Env3Dest::Cutoff,
+        });
+        stacked.apply(ControlEvent::SetFiltEnvAmt { amount: 2.0 });
+        stacked.apply(ControlEvent::SetEnv3Amt { amount: 2.0 });
+        combined.apply(ControlEvent::SetFiltEnvAmt { amount: 4.0 });
+        combined.apply(ControlEvent::SetEnv3Amt { amount: 0.0 });
 
-        stacked.note_on(57, 127);
-        combined.note_on(57, 127);
+        note_on(&mut stacked, 57, 127);
+        note_on(&mut combined, 57, 127);
         for _ in 0..2_000 {
             stacked.next_sample();
             combined.next_sample();
@@ -736,16 +854,18 @@ mod tests {
     #[test]
     fn pitch_dest_plus_one_octave_at_sustain() {
         let mut engine = Engine::new(SAMPLE_RATE_HZ);
-        engine.set_waveform(Waveform::Saw);
-        engine.set_cutoff_hz(10_000.0);
-        engine.set_resonance(0.0);
+        set_wave(&mut engine, Waveform::Saw);
+        set_cutoff(&mut engine, 10_000.0);
+        set_res(&mut engine, 0.0);
         set_fast_amp_sustain(&mut engine);
         set_fast_assign_env_sustain(&mut engine);
-        engine.set_env3_dest(Env3Dest::Pitch);
-        engine.set_env3_amt(1.0);
+        engine.apply(ControlEvent::SetEnv3Dest {
+            dest: Env3Dest::Pitch,
+        });
+        engine.apply(ControlEvent::SetEnv3Amt { amount: 1.0 });
 
         let note = 57u8;
-        engine.note_on(note, 127);
+        note_on(&mut engine, note, 127);
         for _ in 0..2_000 {
             engine.next_sample();
         }
@@ -767,7 +887,8 @@ mod tests {
     #[test]
     fn envcopy_and_envlink_then_unlink_on_extra_times() {
         let mut engine = Engine::new(SAMPLE_RATE_HZ);
-        engine.set_envelope(
+        set_envelope(
+            &mut engine,
             EnvelopeId::Amp,
             AdsrTimes {
                 attack_ms: 50.0,
@@ -777,7 +898,7 @@ mod tests {
             },
         );
 
-        engine.env_copy();
+        engine.apply(ControlEvent::EnvCopy);
         assert!((engine.params().filter_env.attack_ms - 50.0).abs() < f32::EPSILON);
         assert!((engine.params().filter_env.decay_ms - 80.0).abs() < f32::EPSILON);
         assert!((engine.params().filter_env.sustain - 0.4).abs() < f32::EPSILON);
@@ -785,21 +906,26 @@ mod tests {
         assert!((engine.params().assign_env.attack_ms - 50.0).abs() < f32::EPSILON);
         assert!(!engine.params().env_link);
 
-        engine.set_env_link(true);
+        engine.apply(ControlEvent::SetEnvLink { on: true });
         assert!(engine.params().env_link);
-        engine.patch_envelope(EnvelopeId::Amp, |times| times.attack_ms = 90.0);
+        patch_field(&mut engine, EnvelopeId::Amp, EnvelopeField::Attack, 90.0);
         assert!((engine.params().filter_env.attack_ms - 90.0).abs() < f32::EPSILON);
         assert!((engine.params().assign_env.attack_ms - 90.0).abs() < f32::EPSILON);
 
-        engine.patch_envelope(EnvelopeId::Filter, |times| times.attack_ms = 12.0);
+        patch_field(&mut engine, EnvelopeId::Filter, EnvelopeField::Attack, 12.0);
         assert!(!engine.params().env_link);
         assert!((engine.params().filter_env.attack_ms - 12.0).abs() < f32::EPSILON);
-        engine.patch_envelope(EnvelopeId::Amp, |times| times.attack_ms = 200.0);
+        patch_field(&mut engine, EnvelopeId::Amp, EnvelopeField::Attack, 200.0);
         assert!((engine.params().amp.attack_ms - 200.0).abs() < f32::EPSILON);
         assert!((engine.params().filter_env.attack_ms - 12.0).abs() < f32::EPSILON);
 
-        engine.set_env_link(true);
-        engine.patch_envelope(EnvelopeId::Assignable, |times| times.decay_ms = 33.0);
+        engine.apply(ControlEvent::SetEnvLink { on: true });
+        patch_field(
+            &mut engine,
+            EnvelopeId::Assignable,
+            EnvelopeField::Decay,
+            33.0,
+        );
         assert!(!engine.params().env_link);
         assert!((engine.params().assign_env.decay_ms - 33.0).abs() < f32::EPSILON);
     }
@@ -807,7 +933,8 @@ mod tests {
     #[test]
     fn set_envelope_clamps_times_and_sustain() {
         let mut engine = Engine::new(SAMPLE_RATE_HZ);
-        engine.set_envelope(
+        set_envelope(
+            &mut engine,
             EnvelopeId::Amp,
             AdsrTimes {
                 attack_ms: -5.0,
@@ -828,19 +955,21 @@ mod tests {
         let mut quiet = Engine::new(SAMPLE_RATE_HZ);
         let mut loud = Engine::new(SAMPLE_RATE_HZ);
         for engine in [&mut quiet, &mut loud] {
-            engine.set_waveform(Waveform::Saw);
-            engine.set_cutoff_hz(10_000.0);
-            engine.set_resonance(0.0);
+            set_wave(engine, Waveform::Saw);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
             set_fast_amp_sustain(engine);
             set_fast_assign_env_sustain(engine);
-            engine.set_env3_dest(Env3Dest::Pitch);
-            engine.set_env3_amt(1.0);
-            engine.set_envvel(1.0);
+            engine.apply(ControlEvent::SetEnv3Dest {
+                dest: Env3Dest::Pitch,
+            });
+            engine.apply(ControlEvent::SetEnv3Amt { amount: 1.0 });
+            engine.apply(ControlEvent::SetEnvVel { amount: 1.0 });
         }
 
         let note = 57u8;
-        quiet.note_on(note, 32);
-        loud.note_on(note, 127);
+        note_on(&mut quiet, note, 32);
+        note_on(&mut loud, note, 127);
         for _ in 0..2_000 {
             quiet.next_sample();
             loud.next_sample();
