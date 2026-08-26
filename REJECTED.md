@@ -10,3 +10,4 @@ Closed doors. Do not re-propose these unless the author explicitly reopens them 
 - **Mutex for audio-callback control signals** — rejected in favor of atomics; the audio thread must never risk blocking on a lock.
 - **Windows-native host via rustup's GNU/MinGW toolchain** — attempted and abandoned (`dlltool` without assembler). Stays closed. Use MSVC Build Tools for `host-windows` instead.
 - **WSL-only listening for laptop play-tests** — reversed. WSLg Pulse/`RDPSink` drops the cpal stream with ALSA `snd_pcm_avail_delay` I/O error (5) even when idle. Native `host-windows` on MSVC is the play path; `host-wsl` remains for WSL work.
+- **Glued engine tokens (`eng2`)** — parser requires `eng 2` with a space, matching other commands.

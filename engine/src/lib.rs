@@ -2,10 +2,12 @@
 
 mod envelope;
 mod filter;
+mod mixer;
 mod oscillator;
 
 pub use envelope::{Adsr, AdsrTimes, EnvelopeStage, velocity_to_amp};
 pub use filter::Svf;
+pub use mixer::{ENGINE_COUNT, Mixer, MixerEvent, SlotEvent};
 pub use oscillator::{Oscillator, Waveform};
 
 use envelope::velocity_to_amp as vel_amp;
@@ -145,6 +147,7 @@ impl Voice {
 }
 
 /// Shared subtractive params for one engine instance.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EngineParams {
     pub waveform: Waveform,
     pub cutoff_hz: f32,
@@ -185,6 +188,103 @@ impl EngineParams {
             EnvelopeId::Assignable => self.assign_env,
         }
     }
+
+    /// Updates params for param events. Returns false for NoteOn/NoteOff.
+    pub fn apply(&mut self, event: ControlEvent) -> bool {
+        match event {
+            ControlEvent::NoteOn { .. } | ControlEvent::NoteOff { .. } => false,
+            ControlEvent::SetCutoff { hz } => {
+                self.cutoff_hz = hz.max(20.0);
+                true
+            }
+            ControlEvent::SetResonance { amount } => {
+                self.resonance = amount.clamp(0.0, 1.0);
+                true
+            }
+            ControlEvent::SetWave { waveform } => {
+                self.waveform = waveform;
+                true
+            }
+            ControlEvent::SetEnvelope { which, times } => {
+                self.set_envelope(which, times);
+                true
+            }
+            ControlEvent::PatchEnvelope {
+                which,
+                field,
+                value,
+            } => {
+                let mut times = self.envelope(which);
+                match field {
+                    EnvelopeField::Attack => times.attack_ms = value,
+                    EnvelopeField::Decay => times.decay_ms = value,
+                    EnvelopeField::Sustain => times.sustain = value,
+                    EnvelopeField::Release => times.release_ms = value,
+                }
+                self.set_envelope(which, times);
+                true
+            }
+            ControlEvent::SetFiltEnvAmt { amount } => {
+                self.filtenv_amt = amount.clamp(AMT_MIN, AMT_MAX);
+                true
+            }
+            ControlEvent::SetEnv3Dest { dest } => {
+                self.env3_dest = dest;
+                true
+            }
+            ControlEvent::SetEnv3Amt { amount } => {
+                self.env3_amt = amount.clamp(AMT_MIN, AMT_MAX);
+                true
+            }
+            ControlEvent::EnvCopy => {
+                self.copy_amp_times_to_extra_envelopes();
+                true
+            }
+            ControlEvent::SetEnvLink { on } => {
+                self.env_link = on;
+                if on {
+                    self.copy_amp_times_to_extra_envelopes();
+                }
+                true
+            }
+            ControlEvent::SetEnvVel { amount } => {
+                self.envvel = amount.clamp(0.0, 1.0);
+                true
+            }
+        }
+    }
+
+    fn set_envelope(&mut self, which: EnvelopeId, times: AdsrTimes) {
+        let times = times.clamped();
+        match which {
+            EnvelopeId::Amp => {
+                self.amp = times;
+                if self.env_link {
+                    self.filter_env = times;
+                    self.assign_env = times;
+                }
+            }
+            EnvelopeId::Filter => {
+                self.unlink_if_needed();
+                self.filter_env = times;
+            }
+            EnvelopeId::Assignable => {
+                self.unlink_if_needed();
+                self.assign_env = times;
+            }
+        }
+    }
+
+    fn unlink_if_needed(&mut self) {
+        if self.env_link {
+            self.env_link = false;
+        }
+    }
+
+    fn copy_amp_times_to_extra_envelopes(&mut self) {
+        self.filter_env = self.amp;
+        self.assign_env = self.amp;
+    }
 }
 
 /// One engine instance: fixed voices that turn MIDI notes into mono audio.
@@ -193,6 +293,8 @@ pub struct Engine {
     voices: [Voice; VOICE_COUNT],
     next_age: u32,
     params: EngineParams,
+    #[cfg(test)]
+    next_sample_calls: u32,
 }
 
 impl Engine {
@@ -208,6 +310,8 @@ impl Engine {
             ],
             next_age: 1,
             params,
+            #[cfg(test)]
+            next_sample_calls: 0,
         };
         engine.apply_envelope_params_to_all();
         engine
@@ -222,110 +326,47 @@ impl Engine {
         match event {
             ControlEvent::NoteOn { note, velocity } => self.note_on(note, velocity),
             ControlEvent::NoteOff { note } => self.note_off(note),
-            ControlEvent::SetCutoff { hz } => self.set_cutoff_hz(hz),
-            ControlEvent::SetResonance { amount } => self.set_resonance(amount),
-            ControlEvent::SetWave { waveform } => self.set_waveform(waveform),
-            ControlEvent::SetEnvelope { which, times } => self.set_envelope(which, times),
-            ControlEvent::PatchEnvelope {
-                which,
-                field,
-                value,
-            } => self.patch_envelope(which, |times| match field {
-                EnvelopeField::Attack => times.attack_ms = value,
-                EnvelopeField::Decay => times.decay_ms = value,
-                EnvelopeField::Sustain => times.sustain = value,
-                EnvelopeField::Release => times.release_ms = value,
-            }),
-            ControlEvent::SetFiltEnvAmt { amount } => self.set_filtenv_amt(amount),
-            ControlEvent::SetEnv3Dest { dest } => self.set_env3_dest(dest),
-            ControlEvent::SetEnv3Amt { amount } => self.set_env3_amt(amount),
-            ControlEvent::EnvCopy => self.env_copy(),
-            ControlEvent::SetEnvLink { on } => self.set_env_link(on),
-            ControlEvent::SetEnvVel { amount } => self.set_envvel(amount),
-        }
-    }
-
-    fn set_waveform(&mut self, waveform: Waveform) {
-        self.params.waveform = waveform;
-        for voice in self.voices.iter_mut() {
-            voice.oscillator.set_waveform(waveform);
-        }
-    }
-
-    fn set_cutoff_hz(&mut self, cutoff_hz: f32) {
-        self.params.cutoff_hz = cutoff_hz.max(20.0);
-    }
-
-    fn set_resonance(&mut self, resonance: f32) {
-        self.params.resonance = resonance.clamp(0.0, 1.0);
-    }
-
-    /// Sets ADSR times for one envelope. Amp follows envelope link. Filter or assignable unlinks.
-    fn set_envelope(&mut self, which: EnvelopeId, times: AdsrTimes) {
-        let times = times.clamped();
-        match which {
-            EnvelopeId::Amp => {
-                self.params.amp = times;
-                if self.params.env_link {
-                    self.params.filter_env = times;
-                    self.params.assign_env = times;
+            ControlEvent::SetWave { waveform } => {
+                let _ = self.params.apply(event);
+                for voice in self.voices.iter_mut() {
+                    voice.oscillator.set_waveform(waveform);
                 }
             }
-            EnvelopeId::Filter => {
-                self.unlink_if_needed();
-                self.params.filter_env = times;
+            ControlEvent::SetEnvelope { .. }
+            | ControlEvent::PatchEnvelope { .. }
+            | ControlEvent::EnvCopy => {
+                let _ = self.params.apply(event);
+                self.apply_envelope_params_to_all();
             }
-            EnvelopeId::Assignable => {
-                self.unlink_if_needed();
-                self.params.assign_env = times;
+            ControlEvent::SetEnvLink { on } => {
+                let _ = self.params.apply(event);
+                if on {
+                    self.apply_envelope_params_to_all();
+                }
+            }
+            ControlEvent::SetCutoff { .. }
+            | ControlEvent::SetResonance { .. }
+            | ControlEvent::SetFiltEnvAmt { .. }
+            | ControlEvent::SetEnv3Dest { .. }
+            | ControlEvent::SetEnv3Amt { .. }
+            | ControlEvent::SetEnvVel { .. } => {
+                let _ = self.params.apply(event);
             }
         }
-        self.apply_envelope_params_to_all();
     }
 
-    fn patch_envelope(&mut self, which: EnvelopeId, patch: impl FnOnce(&mut AdsrTimes)) {
-        let mut times = self.params.envelope(which);
-        patch(&mut times);
-        self.set_envelope(which, times);
-    }
-
-    fn set_filtenv_amt(&mut self, amount: f32) {
-        self.params.filtenv_amt = amount.clamp(AMT_MIN, AMT_MAX);
-    }
-
-    fn set_env3_dest(&mut self, dest: Env3Dest) {
-        self.params.env3_dest = dest;
-    }
-
-    fn set_env3_amt(&mut self, amount: f32) {
-        self.params.env3_amt = amount.clamp(AMT_MIN, AMT_MAX);
-    }
-
-    fn env_copy(&mut self) {
-        self.copy_amp_times_to_extra_envelopes();
-    }
-
-    fn set_env_link(&mut self, on: bool) {
-        self.params.env_link = on;
-        if on {
-            self.copy_amp_times_to_extra_envelopes();
+    /// Force every voice envelope to Idle at level 0 so sound does not resume later.
+    pub fn silence(&mut self) {
+        for voice in self.voices.iter_mut() {
+            voice.amp.force_idle();
+            voice.filter_env.force_idle();
+            voice.assign_env.force_idle();
         }
     }
 
-    fn set_envvel(&mut self, amount: f32) {
-        self.params.envvel = amount.clamp(0.0, 1.0);
-    }
-
-    fn unlink_if_needed(&mut self) {
-        if self.params.env_link {
-            self.params.env_link = false;
-        }
-    }
-
-    fn copy_amp_times_to_extra_envelopes(&mut self) {
-        self.params.filter_env = self.params.amp;
-        self.params.assign_env = self.params.amp;
-        self.apply_envelope_params_to_all();
+    #[cfg(test)]
+    pub(crate) fn next_sample_call_count(&self) -> u32 {
+        self.next_sample_calls
     }
 
     fn apply_envelope_params_to_all(&mut self) {
@@ -414,6 +455,10 @@ impl Engine {
 
     /// Sums active voices into one mono sample in roughly [-1.0, 1.0].
     pub fn next_sample(&mut self) -> f32 {
+        #[cfg(test)]
+        {
+            self.next_sample_calls = self.next_sample_calls.wrapping_add(1);
+        }
         let sample_rate = self.sample_rate_hz;
         let cutoff_base = self.params.cutoff_hz;
         let resonance_base = self.params.resonance;

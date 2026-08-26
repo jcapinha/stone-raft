@@ -78,6 +78,12 @@ impl Adsr {
         }
     }
 
+    /// Immediate silence. Used when a mixer slot is turned off.
+    pub fn force_idle(&mut self) {
+        self.stage = EnvelopeStage::Idle;
+        self.level = 0.0;
+    }
+
     /// Advances one sample and returns the current level in 0..1.
     pub fn next_level(&mut self) -> f32 {
         match self.stage {

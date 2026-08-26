@@ -13,6 +13,19 @@ _Avoid_: runner, container
 **Engine**:
 One self-contained sound recipe (for example a subtractive synth) assigned to a MIDI channel. Several engines run at once for multitimbral sound.
 
+**Mixer**:
+Sums enabled engine instances into one mono output. Disabled instances are skipped so they do not run DSP. Each instance has a volume.
+_Avoid_: rack
+
+**Current engine**:
+The instance that unqualified terminal commands and keyboard-fallback notes address. MIDI notes ignore this and use each instance’s listen channel.
+
+**Listen channel**:
+The MIDI channel (1 through 16) an enabled engine instance responds to. Two instances may share a channel.
+
+**Enabled**:
+Whether an engine instance is in the mix loop and accepts notes. Off means no DSP and no sound from that instance.
+
 **Voice**:
 One sounding note or layer the synth is generating at a moment in time.
 _Avoid_: channel (unless meaning audio output channel or MIDI channel)
@@ -73,16 +86,19 @@ The first engine is subtractive: one oscillator per voice (PolyBLEP saw or squar
 Three ADSRs per voice. Amp owns voice lifetime. Cutoff uses exponential signed-octave modulation; stacking adds octave offsets. Assignable dests are off, resonance, pitch, and cutoff. Times are independent. `envcopy` snapshots amp times onto the other two. `envlink` snaps then follows amp time commands; a filtenv* or env3* time command unlinks. Shared `envvel` defaults to 0; split fvel/e3vel later if needed. Key tracking is not in this slice.
 
 **Terminal param control for laptop development**
-While developing without a MIDI device, the laptop hosts (via `host-common`) change engine params via named line commands (cutoff in Hz, resonance and sustain in 0–1, ADSR times in milliseconds, wave select, filtenvamt, filtenv* times, env3dest, env3amt, env3* times, envcopy, envlink, envvel). A `random` command fills every subtractive param with bounded random values and prints the resulting patch so it can be replayed by hand. Same command on `host-wsl` and `host-windows`. Real MIDI CC from the Polyend or other devices are a later session. High-rate knobs/CC may later use atomics plus smoothing; discrete commands and note events use the SPSC queue now.
+Laptop hosts (via `host-common`) change engine params with named line commands. Commands target a current engine (`eng 1` through `eng 4`, 1-based, space required). Unqualified commands hit current. `eng 2 cutoff 800` is one-shot and does not change current. Routing commands: `on`, `off`, `ch <1..16>`, `vol <0..1>`. `show` prints a replayable qualified patch from a host-side copy. `random` fills subtractive params plus volume (0.2–1.0) and does not change on/off or listen channel. Printed patches use `eng N ...` lines. Same commands on `host-wsl` and `host-windows`. Real MIDI CC from the Polyend or other devices are a later session. High-rate knobs/CC may later use atomics plus smoothing; discrete commands and note events use the SPSC queue now.
 
 **Multitimbral routing with per-engine volume**
-Incoming MIDI is routed by channel to a matching engine instance; engine outputs are summed into one mix. Each instance's volume (gain) is adjustable live via MIDI CC now, and physical knobs later. Longer term: configurable channel → instance mapping, including several instances of the same recipe with independent params (filter, ADSR, etc.). Not built yet.
+Four engine instances live in a mixer in the `engine` crate. Instance 1 starts enabled on listen channel 1. Instances 2–4 start disabled, with listen channels 2, 3, and 4 pre-set. MIDI notes fan out to every enabled instance whose listen channel matches. Disabled instances are skipped in the audio loop and ignore notes. `off` silences that instance immediately. Volume is per instance via terminal `vol` (default 1.0). MIDI CC volume waits with the rest of CC mapping. Physical knobs later.
 
 **Per-engine fixed polyphony**
 Each engine has a fixed set of 4 voices (tunable after measuring the Daisy). Note-off starts amp release; a voice frees when the amp envelope finishes. When stealing, prefer voices already in release (oldest among those), else the oldest voice overall. Note number → Hz lives in the engine. Voices use a fixed low per-voice gain, velocity curve, and are summed (no divide-by-voice-count). A shared voice pool may come later if channels starve each other.
 
 **Laptop MIDI and keyboard input**
-Shared host plumbing opens a midir input when available: auto-select if there is exactly one port, otherwise list ports and pick by number. Note on/off feed the engine. If no MIDI port exists, a crossterm one-octave laptop-keyboard fallback (from C4, fixed velocity) pushes the same events. Param line commands work in both paths. This development slice listens on all MIDI channels with a single engine instance. Under WSL, terminal key release is not available, so keyboard-fallback notes rely on amp release and voice stealing. On native Windows (`host-windows`), the console reports key-up so hold-to-play works.
+Shared host plumbing opens a midir input when available: auto-select if there is exactly one port, otherwise list ports and pick by number. Note on/off carry MIDI channel and the mixer routes by listen channel. If no MIDI port exists, a crossterm one-octave laptop-keyboard fallback (from C4, fixed velocity) plays the current engine when that engine is on. Param line commands work in both paths. Under WSL, terminal key release is not available, so keyboard-fallback notes rely on amp release and voice stealing. On native Windows (`host-windows`), the console reports key-up so hold-to-play works.
+
+**Host-side patch copy for show**
+The audio thread owns the mixer. The host stores params, volume, enabled, and listen channel per instance and updates them when it enqueues slot commands. `show` prints that copy. Param apply rules live in the engine crate so `envlink` and `envcopy` match the sounding engine.
 
 **WSL for development, Windows for reliable play**
 Edit code and run engine tests in WSL. Optional `host-wsl` is fine for quick checks but WSLg audio is flaky. Reliable listening, real MIDI devices, and keyboard hold-to-play use `host-windows` built with the MSVC toolchain from PowerShell (repo reachable via `\\wsl$\...`). Reevaluate this two-host laptop split when the Daisy arrives.

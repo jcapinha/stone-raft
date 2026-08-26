@@ -10,7 +10,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, FromSample, SizedSample};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use engine::{AdsrTimes, ControlEvent, Engine, Env3Dest, EnvelopeField, EnvelopeId, Waveform};
+use engine::{
+    AdsrTimes, ControlEvent, ENGINE_COUNT, EngineParams, Env3Dest, EnvelopeField, EnvelopeId,
+    Mixer, MixerEvent, SlotEvent, Waveform,
+};
 use midir::{MidiInput, MidiInputConnection, MidiInputPort};
 use rand::Rng;
 use rtrb::{Producer, RingBuffer};
@@ -29,6 +32,8 @@ const RANDOM_AMT_MIN: f32 = -4.0;
 const RANDOM_AMT_MAX: f32 = 4.0;
 const RANDOM_RES_AMT_MIN: f32 = -1.0;
 const RANDOM_RES_AMT_MAX: f32 = 1.0;
+const RANDOM_VOL_MIN: f32 = 0.2;
+const RANDOM_VOL_MAX: f32 = 1.0;
 
 const RANDOM_WAVEFORMS: [Waveform; 2] = [Waveform::Saw, Waveform::Square];
 const RANDOM_ENV3_DESTS: [Env3Dest; 4] = [
@@ -38,9 +43,93 @@ const RANDOM_ENV3_DESTS: [Env3Dest; 4] = [
     Env3Dest::Cutoff,
 ];
 
-struct ParamCommand {
-    events: Vec<ControlEvent>,
-    report: Option<String>,
+struct SlotShadow {
+    params: EngineParams,
+    enabled: bool,
+    listen_channel: u8,
+    volume: f32,
+}
+
+struct Session {
+    current_slot: usize,
+    shadows: [SlotShadow; ENGINE_COUNT],
+}
+
+impl Session {
+    fn new() -> Self {
+        Self {
+            current_slot: 0,
+            shadows: [
+                SlotShadow {
+                    params: EngineParams::default(),
+                    enabled: true,
+                    listen_channel: 1,
+                    volume: 1.0,
+                },
+                SlotShadow {
+                    params: EngineParams::default(),
+                    enabled: false,
+                    listen_channel: 2,
+                    volume: 1.0,
+                },
+                SlotShadow {
+                    params: EngineParams::default(),
+                    enabled: false,
+                    listen_channel: 3,
+                    volume: 1.0,
+                },
+                SlotShadow {
+                    params: EngineParams::default(),
+                    enabled: false,
+                    listen_channel: 4,
+                    volume: 1.0,
+                },
+            ],
+        }
+    }
+
+    fn apply_event(&mut self, event: MixerEvent) {
+        match event {
+            MixerEvent::ToSlot { slot, event } => {
+                let index = slot as usize;
+                if index >= ENGINE_COUNT {
+                    return;
+                }
+                let shadow = &mut self.shadows[index];
+                match event {
+                    SlotEvent::Engine(control) => {
+                        let _ = shadow.params.apply(control);
+                    }
+                    SlotEvent::SetEnabled { on } => shadow.enabled = on,
+                    SlotEvent::SetListenChannel { channel } => {
+                        shadow.listen_channel = channel.clamp(1, 16);
+                    }
+                    SlotEvent::SetVolume { amount } => {
+                        shadow.volume = amount.clamp(0.0, 1.0);
+                    }
+                }
+            }
+            MixerEvent::MidiNoteOn { .. } | MixerEvent::MidiNoteOff { .. } => {}
+        }
+    }
+
+    fn current_enabled(&self) -> bool {
+        self.shadows[self.current_slot].enabled
+    }
+}
+
+#[derive(Debug)]
+enum PrintAfter {
+    None,
+    Status,
+    Show { slot: usize },
+    Report(String),
+}
+
+struct ParsedCommand {
+    switch_current: Option<usize>,
+    events: Vec<MixerEvent>,
+    print: PrintAfter,
 }
 
 /// Opens audio and MIDI (or keyboard fallback) and runs until the user quits.
@@ -57,10 +146,11 @@ pub fn run(midi_client_name: &str) -> Result<(), Box<dyn Error>> {
         supported_config.channels()
     );
 
-    let (producer, consumer) = RingBuffer::<ControlEvent>::new(EVENT_QUEUE_CAPACITY);
+    let (producer, consumer) = RingBuffer::<MixerEvent>::new(EVENT_QUEUE_CAPACITY);
     // Mutex is only for MIDI callback vs terminal (never held on the audio path).
     let producer = Arc::new(Mutex::new(producer));
     let stream_config = supported_config.config();
+    let mut session = Session::new();
 
     let stream = match supported_config.sample_format() {
         cpal::SampleFormat::F32 => build_stream::<f32>(&device, stream_config, consumer)?,
@@ -75,13 +165,13 @@ pub fn run(midi_client_name: &str) -> Result<(), Box<dyn Error>> {
     if let Some(_midi_connection) = try_open_midi_input(midi_client_name, Arc::clone(&producer))? {
         println!("Type engine commands (cutoff, res, attack, …) or q then Enter to quit.");
         print_param_help();
-        run_line_command_loop(&producer)?;
+        run_line_command_loop(&producer, &mut session)?;
     } else {
         println!("Using laptop keyboard.");
         print_keyboard_map();
         print_param_help();
         println!("Press / for a param command, q to quit.");
-        run_keyboard_loop(&producer)?;
+        run_keyboard_loop(&producer, &mut session)?;
     }
 
     Ok(())
@@ -124,23 +214,23 @@ fn prompt_index(prompt: &str, count: usize) -> Result<usize, Box<dyn Error>> {
 fn build_stream<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    mut consumer: rtrb::Consumer<ControlEvent>,
+    mut consumer: rtrb::Consumer<MixerEvent>,
 ) -> Result<cpal::Stream, Box<dyn Error>>
 where
     T: SizedSample + FromSample<f32>,
 {
     let channels = config.channels as usize;
-    let mut engine = Engine::new(config.sample_rate as f32);
+    let mut mixer = Mixer::new(config.sample_rate as f32);
 
     let stream = device.build_output_stream(
         config,
         move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
             while let Ok(event) = consumer.pop() {
-                engine.apply(event);
+                mixer.apply(event);
             }
 
             for frame in data.chunks_mut(channels) {
-                let sample = engine.next_sample();
+                let sample = mixer.next_sample();
                 let value = T::from_sample(sample);
                 for out in frame.iter_mut() {
                     *out = value;
@@ -154,7 +244,7 @@ where
     Ok(stream)
 }
 
-fn push_event(producer: &Arc<Mutex<Producer<ControlEvent>>>, event: ControlEvent) {
+fn push_event(producer: &Arc<Mutex<Producer<MixerEvent>>>, event: MixerEvent) {
     // If the audio thread is behind, drop the event rather than blocking the audio path.
     // Contending briefly with the other control writer is fine; we never lock in the callback.
     if let Ok(mut guard) = producer.lock() {
@@ -164,7 +254,7 @@ fn push_event(producer: &Arc<Mutex<Producer<ControlEvent>>>, event: ControlEvent
 
 fn try_open_midi_input(
     client_name: &str,
-    producer: Arc<Mutex<Producer<ControlEvent>>>,
+    producer: Arc<Mutex<Producer<MixerEvent>>>,
 ) -> Result<Option<MidiInputConnection<()>>, Box<dyn Error>> {
     // On some setups (e.g. WSL without an ALSA sequencer) midir cannot initialize.
     // Treat that like "no ports" so the keyboard fallback still works.
@@ -219,7 +309,7 @@ fn select_midi_port(
     Ok(ports[index].clone())
 }
 
-fn parse_midi_message(message: &[u8]) -> Option<ControlEvent> {
+fn parse_midi_message(message: &[u8]) -> Option<MixerEvent> {
     if message.len() < 2 {
         return None;
     }
@@ -228,10 +318,15 @@ fn parse_midi_message(message: &[u8]) -> Option<ControlEvent> {
     let note = message[1];
     let velocity = message.get(2).copied().unwrap_or(0);
     let kind = status & 0xF0;
+    let channel = (status & 0x0F) + 1;
 
     match kind {
-        0x90 if velocity > 0 => Some(ControlEvent::NoteOn { note, velocity }),
-        0x90 | 0x80 => Some(ControlEvent::NoteOff { note }),
+        0x90 if velocity > 0 => Some(MixerEvent::MidiNoteOn {
+            channel,
+            note,
+            velocity,
+        }),
+        0x90 | 0x80 => Some(MixerEvent::MidiNoteOff { channel, note }),
         _ => None,
     }
 }
@@ -243,7 +338,15 @@ fn print_keyboard_map() {
 }
 
 fn print_param_help() {
-    println!("Param commands:");
+    println!("Engine commands (1-based; space required, e.g. eng 2):");
+    println!("  eng              print current on/off, ch, vol");
+    println!("  eng <1..4>       switch current engine");
+    println!("  on / off         enable or disable (off silences immediately)");
+    println!("  ch <1..16>       MIDI listen channel");
+    println!("  vol <0..1>       instance volume");
+    println!("  show             print qualified patch from host copy");
+    println!("  random           fill params + vol (0.2-1.0); prints eng N lines");
+    println!("Param commands (optional eng N prefix is one-shot):");
     println!("  cutoff <Hz>   res <0..1>   wave saw|square");
     println!("  attack <ms>   decay <ms>   sustain <0..1>   release <ms>");
     println!(
@@ -252,7 +355,6 @@ fn print_param_help() {
     println!("  env3dest off|res|pitch|cutoff   env3amt <signed>");
     println!("  env3attack/decay/release <ms>   env3sustain <0..1>");
     println!("  envcopy   envlink on|off   envvel <0..1>");
-    println!("  random    (fill all params; prints the patch)");
 }
 
 fn key_to_note(code: KeyCode) -> Option<u8> {
@@ -275,17 +377,36 @@ fn key_to_note(code: KeyCode) -> Option<u8> {
     Some(KEYBOARD_ROOT_NOTE + offset)
 }
 
-fn run_keyboard_loop(producer: &Arc<Mutex<Producer<ControlEvent>>>) -> Result<(), Box<dyn Error>> {
+fn run_keyboard_loop(
+    producer: &Arc<Mutex<Producer<MixerEvent>>>,
+    session: &mut Session,
+) -> Result<(), Box<dyn Error>> {
     enable_raw_mode()?;
-    let result = keyboard_event_loop(producer);
+    let result = keyboard_event_loop(producer, session);
     disable_raw_mode()?;
     // Move to a new line after raw mode so the shell prompt is clean.
     println!();
     result
 }
 
+fn keyboard_note_event(session: &Session, note: u8, on: bool) -> MixerEvent {
+    let control = if on {
+        ControlEvent::NoteOn {
+            note,
+            velocity: KEYBOARD_VELOCITY,
+        }
+    } else {
+        ControlEvent::NoteOff { note }
+    };
+    MixerEvent::ToSlot {
+        slot: session.current_slot as u8,
+        event: SlotEvent::Engine(control),
+    }
+}
+
 fn keyboard_event_loop(
-    producer: &Arc<Mutex<Producer<ControlEvent>>>,
+    producer: &Arc<Mutex<Producer<MixerEvent>>>,
+    session: &mut Session,
 ) -> Result<(), Box<dyn Error>> {
     let mut pressed: HashSet<u8> = HashSet::new();
 
@@ -309,7 +430,7 @@ fn keyboard_event_loop(
                     io::stdout().flush()?;
                     let mut line = String::new();
                     io::stdin().read_line(&mut line)?;
-                    dispatch_param_line(producer, line.trim(), Some("(empty command)"));
+                    dispatch_param_line(producer, session, line.trim(), Some("(empty command)"));
                     enable_raw_mode()?;
                 }
                 Event::Key(KeyEvent {
@@ -319,13 +440,15 @@ fn keyboard_event_loop(
                 }) => {
                     if let Some(note) = key_to_note(code) {
                         if pressed.insert(note) {
-                            push_event(
-                                producer,
-                                ControlEvent::NoteOn {
-                                    note,
-                                    velocity: KEYBOARD_VELOCITY,
-                                },
-                            );
+                            if session.current_enabled() {
+                                push_event(producer, keyboard_note_event(session, note, true));
+                            } else {
+                                print!(
+                                    "\r\nengine {} is off; type: on\r\n",
+                                    session.current_slot + 1
+                                );
+                                io::stdout().flush()?;
+                            }
                         }
                     }
                 }
@@ -335,8 +458,8 @@ fn keyboard_event_loop(
                     ..
                 }) => {
                     if let Some(note) = key_to_note(code) {
-                        if pressed.remove(&note) {
-                            push_event(producer, ControlEvent::NoteOff { note });
+                        if pressed.remove(&note) && session.current_enabled() {
+                            push_event(producer, keyboard_note_event(session, note, false));
                         }
                     }
                 }
@@ -350,7 +473,8 @@ fn keyboard_event_loop(
 
 /// Line mode when MIDI is connected: param commands or q to quit.
 fn run_line_command_loop(
-    producer: &Arc<Mutex<Producer<ControlEvent>>>,
+    producer: &Arc<Mutex<Producer<MixerEvent>>>,
+    session: &mut Session,
 ) -> Result<(), Box<dyn Error>> {
     for line in io::stdin().lock().lines() {
         let line = line?;
@@ -358,24 +482,38 @@ fn run_line_command_loop(
         if trimmed.eq_ignore_ascii_case("q") {
             break;
         }
-        dispatch_param_line(producer, trimmed, None);
+        dispatch_param_line(producer, session, trimmed, None);
     }
     Ok(())
 }
 
+fn apply_parsed(session: &mut Session, command: &ParsedCommand) {
+    if let Some(slot) = command.switch_current {
+        session.current_slot = slot;
+    }
+    for event in &command.events {
+        session.apply_event(*event);
+    }
+}
+
 fn dispatch_param_line(
-    producer: &Arc<Mutex<Producer<ControlEvent>>>,
+    producer: &Arc<Mutex<Producer<MixerEvent>>>,
+    session: &mut Session,
     line: &str,
     empty_message: Option<&str>,
 ) {
-    match parse_line_commands(line) {
+    match parse_line_commands(line, session.current_slot) {
         Ok(Some(command)) => {
+            apply_parsed(session, &command);
             for event in command.events {
                 push_event(producer, event);
             }
             println!("ok");
-            if let Some(report) = command.report {
-                print!("{report}");
+            match command.print {
+                PrintAfter::None => {}
+                PrintAfter::Status => print!("{}", format_eng_status(session)),
+                PrintAfter::Show { slot } => print!("{}", format_show(session, slot)),
+                PrintAfter::Report(report) => print!("{report}"),
             }
         }
         Ok(None) => {
@@ -387,27 +525,156 @@ fn dispatch_param_line(
     }
 }
 
-fn parse_line_commands(line: &str) -> Result<Option<ParamCommand>, String> {
+fn is_glued_eng_token(cmd: &str) -> bool {
+    match cmd.strip_prefix("eng") {
+        Some(rest) if !rest.is_empty() => rest.chars().all(|c| c.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+fn parse_engine_number(raw: &str) -> Result<usize, String> {
+    let n: usize = raw
+        .parse()
+        .map_err(|_| format!("eng needs a number 1 through {ENGINE_COUNT}"))?;
+    if !(1..=ENGINE_COUNT).contains(&n) {
+        return Err(format!("eng needs a number 1 through {ENGINE_COUNT}"));
+    }
+    Ok(n - 1)
+}
+
+fn parse_listen_channel(raw: &str) -> Result<u8, String> {
+    let n: u8 = raw
+        .parse()
+        .map_err(|_| "ch needs a channel 1 through 16".to_string())?;
+    if !(1..=16).contains(&n) {
+        return Err("ch needs a channel 1 through 16".to_string());
+    }
+    Ok(n)
+}
+
+fn to_slot(slot: usize, event: SlotEvent) -> MixerEvent {
+    MixerEvent::ToSlot {
+        slot: slot as u8,
+        event,
+    }
+}
+
+fn parse_line_commands(line: &str, current_slot: usize) -> Result<Option<ParsedCommand>, String> {
     if line.is_empty() {
         return Ok(None);
     }
 
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let first = tokens[0].to_ascii_lowercase();
+    if is_glued_eng_token(&first) {
+        return Err("use 'eng N' with a space (for example eng 2)".to_string());
+    }
+
+    if first == "eng" {
+        if tokens.len() == 1 {
+            return Ok(Some(ParsedCommand {
+                switch_current: None,
+                events: Vec::new(),
+                print: PrintAfter::Status,
+            }));
+        }
+        let slot = parse_engine_number(tokens[1])?;
+        if tokens.len() == 2 {
+            return Ok(Some(ParsedCommand {
+                switch_current: Some(slot),
+                events: Vec::new(),
+                print: PrintAfter::Status,
+            }));
+        }
+        let rest = tokens[2..].join(" ");
+        return parse_targeted_command(&rest, slot).map(Some);
+    }
+
+    parse_targeted_command(line, current_slot).map(Some)
+}
+
+fn parse_targeted_command(line: &str, slot: usize) -> Result<ParsedCommand, String> {
     let mut parts = line.split_whitespace();
     let cmd = parts
         .next()
         .ok_or_else(|| "expected a command".to_string())?
         .to_ascii_lowercase();
-    if cmd == "random" {
-        if parts.next().is_some() {
-            return Err("too many arguments".to_string());
-        }
-        return Ok(Some(generate_random_patch(&mut rand::thread_rng())));
+    if is_glued_eng_token(&cmd) {
+        return Err("use 'eng N' with a space (for example eng 2)".to_string());
     }
 
-    Ok(parse_param_command(line)?.map(|event| ParamCommand {
-        events: vec![event],
-        report: None,
-    }))
+    match cmd.as_str() {
+        "on" => {
+            if parts.next().is_some() {
+                return Err("too many arguments".to_string());
+            }
+            Ok(ParsedCommand {
+                switch_current: None,
+                events: vec![to_slot(slot, SlotEvent::SetEnabled { on: true })],
+                print: PrintAfter::None,
+            })
+        }
+        "off" => {
+            if parts.next().is_some() {
+                return Err("too many arguments".to_string());
+            }
+            Ok(ParsedCommand {
+                switch_current: None,
+                events: vec![to_slot(slot, SlotEvent::SetEnabled { on: false })],
+                print: PrintAfter::None,
+            })
+        }
+        "ch" => {
+            let raw = parts
+                .next()
+                .ok_or_else(|| "ch needs a channel 1 through 16".to_string())?;
+            if parts.next().is_some() {
+                return Err("too many arguments".to_string());
+            }
+            let channel = parse_listen_channel(raw)?;
+            Ok(ParsedCommand {
+                switch_current: None,
+                events: vec![to_slot(slot, SlotEvent::SetListenChannel { channel })],
+                print: PrintAfter::None,
+            })
+        }
+        "vol" => {
+            let amount = parse_f32_arg(parts.next(), "vol")?;
+            if parts.next().is_some() {
+                return Err("too many arguments".to_string());
+            }
+            Ok(ParsedCommand {
+                switch_current: None,
+                events: vec![to_slot(slot, SlotEvent::SetVolume { amount })],
+                print: PrintAfter::None,
+            })
+        }
+        "show" => {
+            if parts.next().is_some() {
+                return Err("too many arguments".to_string());
+            }
+            Ok(ParsedCommand {
+                switch_current: None,
+                events: Vec::new(),
+                print: PrintAfter::Show { slot },
+            })
+        }
+        "random" => {
+            if parts.next().is_some() {
+                return Err("too many arguments".to_string());
+            }
+            Ok(generate_random_patch(&mut rand::thread_rng(), slot))
+        }
+        _ => {
+            let event =
+                parse_param_command(line)?.ok_or_else(|| "expected a command".to_string())?;
+            Ok(ParsedCommand {
+                switch_current: None,
+                events: vec![to_slot(slot, SlotEvent::Engine(event))],
+                print: PrintAfter::None,
+            })
+        }
+    }
 }
 
 fn log_uniform<R: Rng>(rng: &mut R, min: f32, max: f32) -> f32 {
@@ -441,7 +708,91 @@ fn env3_dest_name(dest: Env3Dest) -> &'static str {
     }
 }
 
-fn generate_random_patch<R: Rng>(rng: &mut R) -> ParamCommand {
+fn qualified(n: usize, rest: &str) -> String {
+    format!("eng {n} {rest}\n")
+}
+
+fn qualify_block(n: usize, body: &str) -> String {
+    body.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| qualified(n, line))
+        .collect()
+}
+
+fn format_param_lines(params: &EngineParams) -> String {
+    let link_name = if params.env_link { "on" } else { "off" };
+    format!(
+        "wave {}\n\
+         cutoff {:.0}\n\
+         res {:.2}\n\
+         attack {:.0}\n\
+         decay {:.0}\n\
+         sustain {:.2}\n\
+         release {:.0}\n\
+         filtenvamt {:.2}\n\
+         filtenvattack {:.0}\n\
+         filtenvdecay {:.0}\n\
+         filtenvsustain {:.2}\n\
+         filtenvrelease {:.0}\n\
+         env3dest {}\n\
+         env3amt {:.2}\n\
+         env3attack {:.0}\n\
+         env3decay {:.0}\n\
+         env3sustain {:.2}\n\
+         env3release {:.0}\n\
+         envvel {:.2}\n\
+         envlink {link_name}\n",
+        wave_name(params.waveform),
+        params.cutoff_hz,
+        params.resonance,
+        params.amp.attack_ms,
+        params.amp.decay_ms,
+        params.amp.sustain,
+        params.amp.release_ms,
+        params.filtenv_amt,
+        params.filter_env.attack_ms,
+        params.filter_env.decay_ms,
+        params.filter_env.sustain,
+        params.filter_env.release_ms,
+        env3_dest_name(params.env3_dest),
+        params.env3_amt,
+        params.assign_env.attack_ms,
+        params.assign_env.decay_ms,
+        params.assign_env.sustain,
+        params.assign_env.release_ms,
+        params.envvel,
+    )
+}
+
+fn format_eng_status(session: &Session) -> String {
+    let n = session.current_slot + 1;
+    let shadow = &session.shadows[session.current_slot];
+    let state = if shadow.enabled { "on" } else { "off" };
+    format!(
+        "{}{}{}",
+        qualified(n, state),
+        qualified(n, &format!("ch {}", shadow.listen_channel)),
+        qualified(n, &format!("vol {:.2}", shadow.volume)),
+    )
+}
+
+fn format_show(session: &Session, slot: usize) -> String {
+    let n = slot + 1;
+    let shadow = &session.shadows[slot];
+    let state = if shadow.enabled { "on" } else { "off" };
+    let mut out = String::new();
+    out.push_str(&qualified(n, state));
+    out.push_str(&qualified(n, &format!("ch {}", shadow.listen_channel)));
+    out.push_str(&qualified(n, &format!("vol {:.2}", shadow.volume)));
+    out.push_str(&qualify_block(n, &format_param_lines(&shadow.params)));
+    out
+}
+
+fn wrap_engine(slot: usize, event: ControlEvent) -> MixerEvent {
+    to_slot(slot, SlotEvent::Engine(event))
+}
+
+fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
     let waveform = RANDOM_WAVEFORMS[rng.gen_range(0..RANDOM_WAVEFORMS.len())];
     let cutoff_hz = log_uniform(rng, RANDOM_CUTOFF_MIN_HZ, RANDOM_CUTOFF_MAX_HZ);
     let resonance = rng.gen_range(0.0..=RANDOM_RES_MAX);
@@ -458,78 +809,71 @@ fn generate_random_patch<R: Rng>(rng: &mut R) -> ParamCommand {
         }
     };
     let envvel = rng.gen_range(0.0..=1.0);
-    let link_name = if env_link { "on" } else { "off" };
-
-    let report = format!(
-        "wave {}\n\
-         cutoff {cutoff_hz:.0}\n\
-         res {resonance:.2}\n\
-         attack {:.0}\n\
-         decay {:.0}\n\
-         sustain {:.2}\n\
-         release {:.0}\n\
-         filtenvamt {filtenv_amt:.2}\n\
-         filtenvattack {:.0}\n\
-         filtenvdecay {:.0}\n\
-         filtenvsustain {:.2}\n\
-         filtenvrelease {:.0}\n\
-         env3dest {}\n\
-         env3amt {env3_amt:.2}\n\
-         env3attack {:.0}\n\
-         env3decay {:.0}\n\
-         env3sustain {:.2}\n\
-         env3release {:.0}\n\
-         envvel {envvel:.2}\n\
-         envlink {link_name}\n",
-        wave_name(waveform),
-        amp.attack_ms,
-        amp.decay_ms,
-        amp.sustain,
-        amp.release_ms,
-        filter_env.attack_ms,
-        filter_env.decay_ms,
-        filter_env.sustain,
-        filter_env.release_ms,
-        env3_dest_name(env3_dest),
-        assign_env.attack_ms,
-        assign_env.decay_ms,
-        assign_env.sustain,
-        assign_env.release_ms,
-    );
+    let volume = rng.gen_range(RANDOM_VOL_MIN..=RANDOM_VOL_MAX);
+    let params = EngineParams {
+        waveform,
+        cutoff_hz,
+        resonance,
+        amp,
+        filter_env,
+        assign_env,
+        filtenv_amt,
+        env3_amt,
+        env3_dest,
+        env_link,
+        envvel,
+    };
+    let n = slot + 1;
+    let mut report = qualified(n, &format!("vol {volume:.2}"));
+    report.push_str(&qualify_block(n, &format_param_lines(&params)));
 
     let mut events = vec![
-        ControlEvent::SetWave { waveform },
-        ControlEvent::SetCutoff { hz: cutoff_hz },
-        ControlEvent::SetResonance { amount: resonance },
-        ControlEvent::SetEnvelope {
-            which: EnvelopeId::Amp,
-            times: amp,
-        },
-        ControlEvent::SetFiltEnvAmt {
-            amount: filtenv_amt,
-        },
-        ControlEvent::SetEnv3Dest { dest: env3_dest },
-        ControlEvent::SetEnv3Amt { amount: env3_amt },
-        ControlEvent::SetEnvVel { amount: envvel },
+        wrap_engine(slot, ControlEvent::SetWave { waveform }),
+        wrap_engine(slot, ControlEvent::SetCutoff { hz: cutoff_hz }),
+        wrap_engine(slot, ControlEvent::SetResonance { amount: resonance }),
+        wrap_engine(
+            slot,
+            ControlEvent::SetEnvelope {
+                which: EnvelopeId::Amp,
+                times: amp,
+            },
+        ),
+        wrap_engine(
+            slot,
+            ControlEvent::SetFiltEnvAmt {
+                amount: filtenv_amt,
+            },
+        ),
+        wrap_engine(slot, ControlEvent::SetEnv3Dest { dest: env3_dest }),
+        wrap_engine(slot, ControlEvent::SetEnv3Amt { amount: env3_amt }),
+        wrap_engine(slot, ControlEvent::SetEnvVel { amount: envvel }),
+        to_slot(slot, SlotEvent::SetVolume { amount: volume }),
     ];
 
     if env_link {
-        events.push(ControlEvent::SetEnvLink { on: true });
+        events.push(wrap_engine(slot, ControlEvent::SetEnvLink { on: true }));
     } else {
-        events.push(ControlEvent::SetEnvLink { on: false });
-        events.push(ControlEvent::SetEnvelope {
-            which: EnvelopeId::Filter,
-            times: filter_env,
-        });
-        events.push(ControlEvent::SetEnvelope {
-            which: EnvelopeId::Assignable,
-            times: assign_env,
-        });
+        events.push(wrap_engine(slot, ControlEvent::SetEnvLink { on: false }));
+        events.push(wrap_engine(
+            slot,
+            ControlEvent::SetEnvelope {
+                which: EnvelopeId::Filter,
+                times: filter_env,
+            },
+        ));
+        events.push(wrap_engine(
+            slot,
+            ControlEvent::SetEnvelope {
+                which: EnvelopeId::Assignable,
+                times: assign_env,
+            },
+        ));
     }
 
-    ParamCommand {
+    ParsedCommand {
+        switch_current: None,
         events,
-        report: Some(report),
+        print: PrintAfter::Report(report),
     }
 }
 
@@ -663,7 +1007,7 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             Ok(Some(ControlEvent::SetEnvVel { amount }))
         }
         other => Err(format!(
-            "unknown command '{other}' (cutoff, res, attack, decay, sustain, release, wave, filtenv*, env3*, envcopy, envlink, envvel, random)"
+            "unknown command '{other}' (eng, on, off, ch, vol, show, cutoff, res, attack, decay, sustain, release, wave, filtenv*, env3*, envcopy, envlink, envvel, random)"
         )),
     }
 }
@@ -808,25 +1152,34 @@ mod tests {
         assert!(parse_param_command("envlink maybe").is_err());
     }
 
+    fn report_text(command: &ParsedCommand) -> &str {
+        match &command.print {
+            PrintAfter::Report(s) => s,
+            other => panic!("expected report, got {other:?}"),
+        }
+    }
+
     #[test]
     fn rejects_random_with_extra_args() {
-        assert!(parse_line_commands("random extra").is_err());
+        assert!(parse_line_commands("random extra", 0).is_err());
     }
 
     #[test]
     fn parses_random_command() {
-        let parsed = parse_line_commands("random")
+        let parsed = parse_line_commands("random", 0)
             .unwrap()
             .expect("random should produce events");
         assert!(parsed.events.len() > 1);
-        assert!(parsed.report.is_some());
+        assert!(matches!(parsed.print, PrintAfter::Report(_)));
     }
 
     #[test]
     fn random_command_prints_a_replayable_patch() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(1);
-        let patch = generate_random_patch(&mut rng);
-        let report = patch.report.expect("random should print the patch");
+        let patch = generate_random_patch(&mut rng, 0);
+        let report = report_text(&patch);
+        assert!(report.contains("eng "));
+        assert!(report.contains("vol"));
         assert!(report.contains("wave "));
         assert!(report.contains("cutoff "));
         assert!(report.contains("envlink "));
@@ -838,64 +1191,100 @@ mod tests {
     fn random_patches_stay_in_range_and_respect_envlink() {
         for seed in 0..32 {
             let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-            let patch = generate_random_patch(&mut rng);
+            let patch = generate_random_patch(&mut rng, 1);
             let mut saw_link_on = false;
             let mut saw_link_off = false;
             let mut extra_env_times = 0usize;
             let mut env3_dest = Env3Dest::Off;
+            let mut saw_volume = false;
 
             for event in &patch.events {
                 match event {
-                    ControlEvent::SetCutoff { hz } => {
-                        assert!(*hz >= RANDOM_CUTOFF_MIN_HZ && *hz <= RANDOM_CUTOFF_MAX_HZ);
-                    }
-                    ControlEvent::SetResonance { amount } => {
-                        assert!(*amount >= 0.0 && *amount <= RANDOM_RES_MAX);
-                    }
-                    ControlEvent::SetEnvelope { which, times } => {
-                        assert!(
-                            times.attack_ms >= RANDOM_TIME_MIN_MS
-                                && times.attack_ms <= RANDOM_TIME_MAX_MS
-                        );
-                        assert!(
-                            times.decay_ms >= RANDOM_TIME_MIN_MS
-                                && times.decay_ms <= RANDOM_TIME_MAX_MS
-                        );
-                        assert!(
-                            times.release_ms >= RANDOM_TIME_MIN_MS
-                                && times.release_ms <= RANDOM_TIME_MAX_MS
-                        );
-                        assert!(times.sustain >= 0.0 && times.sustain <= 1.0);
-                        match which {
-                            EnvelopeId::Amp => {}
-                            EnvelopeId::Filter | EnvelopeId::Assignable => extra_env_times += 1,
+                    MixerEvent::ToSlot { slot, event } => {
+                        assert_eq!(*slot, 1);
+                        match event {
+                            SlotEvent::SetEnabled { .. } | SlotEvent::SetListenChannel { .. } => {
+                                panic!(
+                                    "seed {seed}: random must not change enabled or listen channel"
+                                );
+                            }
+                            SlotEvent::SetVolume { amount } => {
+                                assert!(
+                                    *amount >= RANDOM_VOL_MIN && *amount <= RANDOM_VOL_MAX,
+                                    "seed {seed}: volume {amount} out of range"
+                                );
+                                saw_volume = true;
+                            }
+                            SlotEvent::Engine(control) => match control {
+                                ControlEvent::SetCutoff { hz } => {
+                                    assert!(
+                                        *hz >= RANDOM_CUTOFF_MIN_HZ && *hz <= RANDOM_CUTOFF_MAX_HZ
+                                    );
+                                }
+                                ControlEvent::SetResonance { amount } => {
+                                    assert!(*amount >= 0.0 && *amount <= RANDOM_RES_MAX);
+                                }
+                                ControlEvent::SetEnvelope { which, times } => {
+                                    assert!(
+                                        times.attack_ms >= RANDOM_TIME_MIN_MS
+                                            && times.attack_ms <= RANDOM_TIME_MAX_MS
+                                    );
+                                    assert!(
+                                        times.decay_ms >= RANDOM_TIME_MIN_MS
+                                            && times.decay_ms <= RANDOM_TIME_MAX_MS
+                                    );
+                                    assert!(
+                                        times.release_ms >= RANDOM_TIME_MIN_MS
+                                            && times.release_ms <= RANDOM_TIME_MAX_MS
+                                    );
+                                    assert!(times.sustain >= 0.0 && times.sustain <= 1.0);
+                                    match which {
+                                        EnvelopeId::Amp => {}
+                                        EnvelopeId::Filter | EnvelopeId::Assignable => {
+                                            extra_env_times += 1
+                                        }
+                                    }
+                                }
+                                ControlEvent::SetEnvVel { amount } => {
+                                    assert!(*amount >= 0.0 && *amount <= 1.0);
+                                }
+                                ControlEvent::SetFiltEnvAmt { amount } => {
+                                    assert!(*amount >= RANDOM_AMT_MIN && *amount <= RANDOM_AMT_MAX);
+                                }
+                                ControlEvent::SetEnv3Dest { dest } => env3_dest = *dest,
+                                ControlEvent::SetEnv3Amt { amount } => match env3_dest {
+                                    Env3Dest::Resonance => {
+                                        assert!(
+                                            *amount >= RANDOM_RES_AMT_MIN
+                                                && *amount <= RANDOM_RES_AMT_MAX
+                                        );
+                                    }
+                                    Env3Dest::Off | Env3Dest::Pitch | Env3Dest::Cutoff => {
+                                        assert!(
+                                            *amount >= RANDOM_AMT_MIN && *amount <= RANDOM_AMT_MAX
+                                        );
+                                    }
+                                },
+                                ControlEvent::SetEnvLink { on: true } => saw_link_on = true,
+                                ControlEvent::SetEnvLink { on: false } => saw_link_off = true,
+                                ControlEvent::SetWave { .. }
+                                | ControlEvent::NoteOn { .. }
+                                | ControlEvent::NoteOff { .. }
+                                | ControlEvent::EnvCopy
+                                | ControlEvent::PatchEnvelope { .. } => {}
+                            },
                         }
                     }
-                    ControlEvent::SetEnvVel { amount } => {
-                        assert!(*amount >= 0.0 && *amount <= 1.0);
+                    MixerEvent::MidiNoteOn { .. } | MixerEvent::MidiNoteOff { .. } => {
+                        panic!("seed {seed}: random must not emit MIDI events");
                     }
-                    ControlEvent::SetFiltEnvAmt { amount } => {
-                        assert!(*amount >= RANDOM_AMT_MIN && *amount <= RANDOM_AMT_MAX);
-                    }
-                    ControlEvent::SetEnv3Dest { dest } => env3_dest = *dest,
-                    ControlEvent::SetEnv3Amt { amount } => match env3_dest {
-                        Env3Dest::Resonance => {
-                            assert!(*amount >= RANDOM_RES_AMT_MIN && *amount <= RANDOM_RES_AMT_MAX);
-                        }
-                        Env3Dest::Off | Env3Dest::Pitch | Env3Dest::Cutoff => {
-                            assert!(*amount >= RANDOM_AMT_MIN && *amount <= RANDOM_AMT_MAX);
-                        }
-                    },
-                    ControlEvent::SetEnvLink { on: true } => saw_link_on = true,
-                    ControlEvent::SetEnvLink { on: false } => saw_link_off = true,
-                    ControlEvent::SetWave { .. }
-                    | ControlEvent::NoteOn { .. }
-                    | ControlEvent::NoteOff { .. }
-                    | ControlEvent::EnvCopy
-                    | ControlEvent::PatchEnvelope { .. } => {}
                 }
             }
 
+            assert!(saw_volume, "seed {seed}: random must include volume");
+            let report = report_text(&patch);
+            assert!(report.contains("eng "));
+            assert!(report.contains("vol"));
             assert!(
                 saw_link_on ^ saw_link_off,
                 "seed {seed}: expected exactly one envlink setting"
@@ -912,5 +1301,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn eng_2_cutoff_is_oneshot() {
+        let mut session = Session::new();
+        assert_eq!(session.current_slot, 0);
+        let parsed = parse_line_commands("eng 2 cutoff 800", session.current_slot)
+            .unwrap()
+            .expect("command");
+        assert!(parsed.switch_current.is_none());
+        match parsed.events.as_slice() {
+            [
+                MixerEvent::ToSlot {
+                    slot: 1,
+                    event: SlotEvent::Engine(ControlEvent::SetCutoff { hz }),
+                },
+            ] => assert!((*hz - 800.0).abs() < f32::EPSILON),
+            other => panic!("unexpected {other:?}"),
+        }
+        apply_parsed(&mut session, &parsed);
+        assert_eq!(session.current_slot, 0);
+        assert!((session.shadows[1].params.cutoff_hz - 800.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn glued_eng2_errors() {
+        assert!(parse_line_commands("eng2", 0).is_err());
+        assert!(parse_line_commands("eng2 cutoff 800", 0).is_err());
+    }
+
+    #[test]
+    fn eng_out_of_range_errors() {
+        assert!(parse_line_commands("eng 0", 0).is_err());
+        assert!(parse_line_commands("eng 5", 0).is_err());
+    }
+
+    #[test]
+    fn ch_out_of_range_errors() {
+        assert!(parse_line_commands("ch 0", 0).is_err());
+        assert!(parse_line_commands("ch 17", 0).is_err());
+    }
+
+    #[test]
+    fn midi_parse_keeps_channel_5() {
+        match parse_midi_message(&[0x94, 60, 100]) {
+            Some(MixerEvent::MidiNoteOn {
+                channel: 5,
+                note: 60,
+                velocity: 100,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eng_2_random_does_not_switch_current_or_routing() {
+        let mut session = Session::new();
+        let parsed = parse_line_commands("eng 2 random", 0)
+            .unwrap()
+            .expect("random");
+        assert!(parsed.switch_current.is_none());
+        apply_parsed(&mut session, &parsed);
+        assert_eq!(session.current_slot, 0);
+        assert!(!session.shadows[1].enabled);
+        assert_eq!(session.shadows[1].listen_channel, 2);
+        assert!(session.shadows[1].volume >= RANDOM_VOL_MIN);
+        assert!(session.shadows[1].volume <= RANDOM_VOL_MAX);
+        let report = report_text(&parsed);
+        assert!(report.contains("eng 2 "));
+        assert!(report.contains("vol"));
+        assert!(!report.contains("eng 2 on"));
+        assert!(!report.contains("eng 2 off"));
+        assert!(!report.contains("eng 2 ch "));
     }
 }

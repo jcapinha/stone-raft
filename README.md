@@ -83,9 +83,9 @@ Those two `$env:...` lines only last for that PowerShell window. Run them again 
 
 ### Playing notes
 
-If there is exactly one MIDI input port, the host connects to it automatically. If there are several, it lists them and asks for a number. Play notes from that device (all MIDI channels drive the single engine for now).
+If there is exactly one MIDI input port, the host connects to it automatically. If there are several, it lists them and asks for a number. MIDI notes go to every enabled engine whose listen channel matches. Engine 1 starts on, listen channel 1. Engines 2–4 start off, with listen channels 2, 3, and 4 already set. Use `on` (or `eng 2 on`) before a disabled engine will sound.
 
-If MIDI cannot be opened, use the laptop keyboard (one octave from C4):
+If MIDI cannot be opened, use the laptop keyboard (one octave from C4). Keyboard notes play the current engine only when that engine is on. If it is off, the host prints `engine N is off; type: on`.
 
 | Keys | Notes |
 |------|--------|
@@ -97,10 +97,16 @@ Audio outputs work the same way: one device is selected automatically; several d
 
 ### Live engine params (terminal)
 
-While audio is running, change subtractive params with named line commands (no MIDI device required):
+While audio is running, change routing and subtractive params with named line commands (no MIDI device required). Unqualified commands hit the current engine. `eng 2 cutoff 800` is one-shot and does not change current. Space is required (`eng2` is an error). `show` prints a host-side copy; `random` fills subtractive params plus volume (0.2–1.0) and prints `eng N` lines including `vol`. Neither `random` nor `show` changes on/off or listen channel.
 
 | Command | Meaning |
 |---------|---------|
+| `eng` | Print current engine on/off, listen channel, and volume (1-based) |
+| `eng <1..4>` | Switch current engine and print that status |
+| `on` / `off` | Enable or disable current (`off` silences immediately) |
+| `ch <1..16>` | MIDI listen channel |
+| `vol <0..1>` | Instance volume |
+| `show` | Print a replayable qualified patch (`eng N ...` lines) |
 | `cutoff <Hz>` | Filter cutoff, e.g. `cutoff 800` |
 | `res <0..1>` | Filter resonance, e.g. `res 0.3` |
 | `attack <ms>` | Amp envelope attack time |
@@ -122,16 +128,18 @@ While audio is running, change subtractive params with named line commands (no M
 | `envcopy` | Copy amp times onto the filter and assignable envelopes |
 | `envlink on` / `envlink off` | When on, amp time commands also write the other two envelopes |
 | `envvel <0..1>` | Shared velocity scaling for extra envelope amounts |
-| `random` | Fill every subtractive param with bounded random values and print the patch |
+| `random` | Fill subtractive params plus volume (0.2–1.0); print `eng N` lines including `vol` |
 
 Example (one command per line, or after `/` in keyboard mode):
 
 ```text
-cutoff 1200
+eng 2 on
+eng 2 cutoff 1200
 res 0.4
 attack 5
 release 400
 wave square
+show
 random
 ```
 
