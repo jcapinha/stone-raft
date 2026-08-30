@@ -11,3 +11,8 @@ Closed doors. Do not re-propose these unless the author explicitly reopens them 
 - **Windows-native host via rustup's GNU/MinGW toolchain** — attempted and abandoned (`dlltool` without assembler). Stays closed. Use MSVC Build Tools for `host-windows` instead.
 - **WSL-only listening for laptop play-tests** — reversed. WSLg Pulse/`RDPSink` drops the cpal stream with ALSA `snd_pcm_avail_delay` I/O error (5) even when idle. Native `host-windows` on MSVC is the play path; `host-wsl` remains for WSL work.
 - **Glued engine tokens (`eng2`)** — parser requires `eng 2` with a space, matching other commands.
+- **Single waveform select as the only osc control** — replaced by per-osc levels; `wave` remains only as a solo preset shortcut.
+- **Independent (non-normalized) at-pitch osc mix** — rejected; the four at-pitch levels normalize as weights. Sub stays additive on top.
+- **Per-voice osc mix levels** — rejected; levels are per engine instance, shared by all voices.
+- **Sub inside the normalized at-pitch mix** — rejected; sub is additive after normalization, with its own `subvol`.
+- **`wave` preset leaving `subvol` untouched** — rejected; solo preset zeros sub as well.

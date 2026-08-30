@@ -94,6 +94,18 @@ pub enum ControlEvent {
     SetWave {
         waveform: Waveform,
     },
+    SetSawVol {
+        amount: f32,
+    },
+    SetSquareVol {
+        amount: f32,
+    },
+    SetTriangleVol {
+        amount: f32,
+    },
+    SetSineVol {
+        amount: f32,
+    },
     SetPulse {
         width: f32,
     },
@@ -144,8 +156,31 @@ fn effective_envelope_amount(amount: f32, envvel: f32, vel: f32) -> f32 {
     amount * (1.0 - envvel + envvel * vel)
 }
 
+#[derive(Clone, Copy)]
+struct AtPitchLevels {
+    saw: f32,
+    square: f32,
+    triangle: f32,
+    sine: f32,
+}
+
+fn normalize_blend(levels: AtPitchLevels, samples: [f32; 4]) -> f32 {
+    let sum = levels.saw + levels.square + levels.triangle + levels.sine;
+    if sum == 0.0 {
+        return 0.0;
+    }
+    (levels.saw * samples[0]
+        + levels.square * samples[1]
+        + levels.triangle * samples[2]
+        + levels.sine * samples[3])
+        / sum
+}
+
 struct Voice {
-    oscillator: VoiceOsc,
+    saw: VoiceOsc,
+    square: VoiceOsc,
+    triangle: VoiceOsc,
+    sine: VoiceOsc,
     sub: VoiceOsc,
     filter: VoiceFilter,
     amp: Adsr,
@@ -159,9 +194,12 @@ struct Voice {
 }
 
 impl Voice {
-    fn new(sample_rate_hz: f32, waveform: VoiceWave) -> Self {
+    fn new(sample_rate_hz: f32) -> Self {
         Self {
-            oscillator: VoiceOsc::new(sample_rate_hz, 440.0, waveform),
+            saw: VoiceOsc::new(sample_rate_hz, 440.0, VoiceWave::Saw),
+            square: VoiceOsc::new(sample_rate_hz, 440.0, VoiceWave::Square),
+            triangle: VoiceOsc::new(sample_rate_hz, 440.0, VoiceWave::Triangle),
+            sine: VoiceOsc::new(sample_rate_hz, 440.0, VoiceWave::Sine),
             sub: VoiceOsc::new(sample_rate_hz, 220.0, VoiceWave::Sine),
             filter: VoiceFilter::new(),
             amp: Adsr::new(sample_rate_hz),
@@ -186,7 +224,10 @@ impl Voice {
 /// Shared subtractive params for one engine instance.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EngineParams {
-    pub waveform: Waveform,
+    pub saw_vol: f32,
+    pub square_vol: f32,
+    pub triangle_vol: f32,
+    pub sine_vol: f32,
     pub pulse_width: f32,
     pub cutoff_hz: f32,
     pub resonance: f32,
@@ -205,7 +246,10 @@ pub struct EngineParams {
 impl Default for EngineParams {
     fn default() -> Self {
         Self {
-            waveform: Waveform::Saw,
+            saw_vol: 1.0,
+            square_vol: 0.0,
+            triangle_vol: 0.0,
+            sine_vol: 0.0,
             pulse_width: PULSE_WIDTH_DEFAULT,
             cutoff_hz: 2_000.0,
             resonance: 0.2,
@@ -245,7 +289,33 @@ impl EngineParams {
                 true
             }
             ControlEvent::SetWave { waveform } => {
-                self.waveform = waveform;
+                self.saw_vol = 0.0;
+                self.square_vol = 0.0;
+                self.triangle_vol = 0.0;
+                self.sine_vol = 0.0;
+                self.sub_vol = 0.0;
+                match waveform {
+                    Waveform::Saw => self.saw_vol = 1.0,
+                    Waveform::Square => self.square_vol = 1.0,
+                    Waveform::Triangle => self.triangle_vol = 1.0,
+                    Waveform::Sine => self.sine_vol = 1.0,
+                }
+                true
+            }
+            ControlEvent::SetSawVol { amount } => {
+                self.saw_vol = amount.clamp(0.0, 1.0);
+                true
+            }
+            ControlEvent::SetSquareVol { amount } => {
+                self.square_vol = amount.clamp(0.0, 1.0);
+                true
+            }
+            ControlEvent::SetTriangleVol { amount } => {
+                self.triangle_vol = amount.clamp(0.0, 1.0);
+                true
+            }
+            ControlEvent::SetSineVol { amount } => {
+                self.sine_vol = amount.clamp(0.0, 1.0);
                 true
             }
             ControlEvent::SetPulse { width } => {
@@ -358,10 +428,10 @@ impl Engine {
         let mut engine = Self {
             sample_rate_hz,
             voices: [
-                Voice::new(sample_rate_hz, params.waveform),
-                Voice::new(sample_rate_hz, params.waveform),
-                Voice::new(sample_rate_hz, params.waveform),
-                Voice::new(sample_rate_hz, params.waveform),
+                Voice::new(sample_rate_hz),
+                Voice::new(sample_rate_hz),
+                Voice::new(sample_rate_hz),
+                Voice::new(sample_rate_hz),
             ],
             next_age: 1,
             params,
@@ -381,16 +451,10 @@ impl Engine {
         match event {
             ControlEvent::NoteOn { note, velocity } => self.note_on(note, velocity),
             ControlEvent::NoteOff { note } => self.note_off(note),
-            ControlEvent::SetWave { waveform } => {
-                let _ = self.params.apply(event);
-                for voice in self.voices.iter_mut() {
-                    voice.oscillator.set_waveform(waveform);
-                }
-            }
             ControlEvent::SetPulse { width } => {
                 let _ = self.params.apply(event);
                 for voice in self.voices.iter_mut() {
-                    voice.oscillator.set_pulse_width(width);
+                    voice.square.set_pulse_width(width);
                 }
             }
             ControlEvent::SetEnvelope { .. }
@@ -407,6 +471,11 @@ impl Engine {
             }
             ControlEvent::SetCutoff { .. }
             | ControlEvent::SetResonance { .. }
+            | ControlEvent::SetWave { .. }
+            | ControlEvent::SetSawVol { .. }
+            | ControlEvent::SetSquareVol { .. }
+            | ControlEvent::SetTriangleVol { .. }
+            | ControlEvent::SetSineVol { .. }
             | ControlEvent::SetFiltEnvAmt { .. }
             | ControlEvent::SetEnv3Dest { .. }
             | ControlEvent::SetEnv3Amt { .. }
@@ -500,13 +569,15 @@ impl Engine {
 
     fn start_voice(&mut self, index: usize, note: u8, velocity: u8, age: u32) {
         let sample_rate = self.sample_rate_hz;
-        let waveform = self.params.waveform;
         let pulse_width = self.params.pulse_width;
         let base_hz = midi_note_to_hz(note);
 
         let voice = &mut self.voices[index];
-        voice.oscillator = VoiceOsc::new(sample_rate, base_hz, waveform);
-        voice.oscillator.set_pulse_width(pulse_width);
+        voice.saw = VoiceOsc::new(sample_rate, base_hz, VoiceWave::Saw);
+        voice.square = VoiceOsc::new(sample_rate, base_hz, VoiceWave::Square);
+        voice.square.set_pulse_width(pulse_width);
+        voice.triangle = VoiceOsc::new(sample_rate, base_hz, VoiceWave::Triangle);
+        voice.sine = VoiceOsc::new(sample_rate, base_hz, VoiceWave::Sine);
         let sub_hz = (base_hz / self.params.sub_octaves.frequency_divisor())
             .clamp(20.0, sample_rate * 0.25);
         voice.sub = VoiceOsc::new(sample_rate, sub_hz, VoiceWave::Sine);
@@ -536,6 +607,12 @@ impl Engine {
         let envvel = self.params.envvel;
         let sub_vol = self.params.sub_vol;
         let sub_octaves = self.params.sub_octaves;
+        let at_pitch = AtPitchLevels {
+            saw: self.params.saw_vol,
+            square: self.params.square_vol,
+            triangle: self.params.triangle_vol,
+            sine: self.params.sine_vol,
+        };
 
         let mut mix = 0.0;
         for voice in self.voices.iter_mut() {
@@ -565,8 +642,44 @@ impl Engine {
             };
 
             let cutoff_hz = hz_times_octaves(cutoff_base, filt_oct + env3_cutoff_oct);
-            voice.oscillator.set_frequency(sample_rate, osc_hz);
-            let main = voice.oscillator.next_sample();
+
+            if at_pitch.saw > 0.0 {
+                voice.saw.set_frequency(sample_rate, osc_hz);
+            }
+            if at_pitch.square > 0.0 {
+                voice.square.set_frequency(sample_rate, osc_hz);
+            }
+            if at_pitch.triangle > 0.0 {
+                voice.triangle.set_frequency(sample_rate, osc_hz);
+            }
+            if at_pitch.sine > 0.0 {
+                voice.sine.set_frequency(sample_rate, osc_hz);
+            }
+
+            let saw_sample = if at_pitch.saw > 0.0 {
+                voice.saw.next_sample()
+            } else {
+                0.0
+            };
+            let square_sample = if at_pitch.square > 0.0 {
+                voice.square.next_sample()
+            } else {
+                0.0
+            };
+            let triangle_sample = if at_pitch.triangle > 0.0 {
+                voice.triangle.next_sample()
+            } else {
+                0.0
+            };
+            let sine_sample = if at_pitch.sine > 0.0 {
+                voice.sine.next_sample()
+            } else {
+                0.0
+            };
+            let main = normalize_blend(
+                at_pitch,
+                [saw_sample, square_sample, triangle_sample, sine_sample],
+            );
             let osc = if sub_vol > 0.0 {
                 let sub_hz = (osc_hz / sub_octaves.frequency_divisor())
                     .clamp(20.0, sample_rate * 0.25);
@@ -684,6 +797,22 @@ mod tests {
 
     fn set_sub_oct(engine: &mut Engine, octaves: SubOctaves) {
         engine.apply(ControlEvent::SetSubOct { octaves });
+    }
+
+    fn set_saw_vol(engine: &mut Engine, amount: f32) {
+        engine.apply(ControlEvent::SetSawVol { amount });
+    }
+
+    fn set_square_vol(engine: &mut Engine, amount: f32) {
+        engine.apply(ControlEvent::SetSquareVol { amount });
+    }
+
+    fn set_triangle_vol(engine: &mut Engine, amount: f32) {
+        engine.apply(ControlEvent::SetTriangleVol { amount });
+    }
+
+    fn set_sine_vol(engine: &mut Engine, amount: f32) {
+        engine.apply(ControlEvent::SetSineVol { amount });
     }
 
     #[test]
@@ -1390,6 +1519,127 @@ mod tests {
             at_shifted_sub > at_unshifted_sub,
             "sub should track pitch env, not stay at MIDI-only sub; shifted={at_shifted_sub} frozen={at_unshifted_sub}"
         );
+    }
+
+    #[test]
+    fn default_patch_is_saw_solo() {
+        let engine = Engine::new(SAMPLE_RATE_HZ);
+        assert!((engine.params().saw_vol - 1.0).abs() < f32::EPSILON);
+        assert!((engine.params().square_vol - 0.0).abs() < f32::EPSILON);
+        assert!((engine.params().triangle_vol - 0.0).abs() < f32::EPSILON);
+        assert!((engine.params().sine_vol - 0.0).abs() < f32::EPSILON);
+        assert!((engine.params().sub_vol - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn wave_preset_sets_levels_and_zeros_sub() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_sub_vol(&mut engine, 0.5);
+        set_wave(&mut engine, Waveform::Triangle);
+        assert!((engine.params().saw_vol - 0.0).abs() < f32::EPSILON);
+        assert!((engine.params().square_vol - 0.0).abs() < f32::EPSILON);
+        assert!((engine.params().triangle_vol - 1.0).abs() < f32::EPSILON);
+        assert!((engine.params().sine_vol - 0.0).abs() < f32::EPSILON);
+        assert!((engine.params().sub_vol - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn single_active_osc_level_normalizes_to_full_scale() {
+        let mut full = Engine::new(SAMPLE_RATE_HZ);
+        let mut partial = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut full, &mut partial] {
+            set_fast_amp_sustain(engine);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
+        }
+        set_wave(&mut full, Waveform::Saw);
+        set_saw_vol(&mut partial, 0.25);
+
+        note_on(&mut full, 48, 127);
+        note_on(&mut partial, 48, 127);
+        for _ in 0..2_000 {
+            full.next_sample();
+            partial.next_sample();
+        }
+        let full_peak = peak_abs(&take_samples(&mut full, ANALYSIS_SAMPLES));
+        let partial_peak = peak_abs(&take_samples(&mut partial, ANALYSIS_SAMPLES));
+        let denom = full_peak.max(1e-6);
+        assert!(
+            (full_peak - partial_peak).abs() / denom < 0.15,
+            "solo saw should sound the same at any non-zero level; full={full_peak} partial={partial_peak}"
+        );
+    }
+
+    #[test]
+    fn mixed_saw_square_differs_from_saw_alone() {
+        let mut saw_only = Engine::new(SAMPLE_RATE_HZ);
+        let mut blend = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut saw_only, &mut blend] {
+            set_fast_amp_sustain(engine);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
+        }
+        set_wave(&mut saw_only, Waveform::Saw);
+        set_saw_vol(&mut blend, 0.5);
+        set_square_vol(&mut blend, 0.5);
+
+        note_on(&mut saw_only, 48, 127);
+        note_on(&mut blend, 48, 127);
+        for _ in 0..2_000 {
+            saw_only.next_sample();
+            blend.next_sample();
+        }
+        let saw_samples = take_samples(&mut saw_only, ANALYSIS_SAMPLES);
+        let blend_samples = take_samples(&mut blend, ANALYSIS_SAMPLES);
+        let h3 = midi_note_to_hz(48) * 3.0;
+        let saw_h3 = tone_strength(&saw_samples, h3);
+        let blend_h3 = tone_strength(&blend_samples, h3);
+        assert!(
+            (saw_h3 - blend_h3).abs() > 1e-4,
+            "saw+square blend should differ spectrally from saw alone; saw={saw_h3} blend={blend_h3}"
+        );
+    }
+
+    #[test]
+    fn sub_only_when_all_at_pitch_levels_zero() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_saw_vol(&mut engine, 0.0);
+        set_square_vol(&mut engine, 0.0);
+        set_triangle_vol(&mut engine, 0.0);
+        set_sine_vol(&mut engine, 0.0);
+        set_cutoff(&mut engine, 10_000.0);
+        set_res(&mut engine, 0.0);
+        set_fast_amp_sustain(&mut engine);
+        set_sub_vol(&mut engine, 1.0);
+        set_sub_oct(&mut engine, SubOctaves::One);
+
+        let note = 60u8;
+        note_on(&mut engine, note, 127);
+        for _ in 0..2_000 {
+            engine.next_sample();
+        }
+        let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
+        let fund = midi_note_to_hz(note);
+        let sub_hz = fund / 2.0;
+        let at_fund = tone_strength(&samples, fund);
+        let at_sub = tone_strength(&samples, sub_hz);
+        assert!(
+            at_sub > TONE_PRESENT,
+            "sub-only mix should still sound at sub frequency; got {at_sub}"
+        );
+        assert!(
+            at_fund < TONE_PRESENT,
+            "sub-only mix should not have strong fundamental; got {at_fund}"
+        );
+    }
+
+    #[test]
+    fn osc_level_clamps_to_unit_range() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_saw_vol(&mut engine, -0.5);
+        assert!((engine.params().saw_vol - 0.0).abs() < f32::EPSILON);
+        set_square_vol(&mut engine, 1.5);
+        assert!((engine.params().square_vol - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
