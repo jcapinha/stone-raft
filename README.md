@@ -113,7 +113,8 @@ While audio is running, change routing and subtractive params with named line co
 | `decay <ms>` | Amp envelope decay time |
 | `sustain <0..1>` | Amp envelope sustain level |
 | `release <ms>` | Amp envelope release time |
-| `wave saw` / `wave square` | Oscillator shape for all voices |
+| `wave saw` / `wave square` / `wave triangle` / `wave sine` | Oscillator shape for all voices (`tri` / `sin` / `sq` aliases) |
+| `pulse <0.05..0.95>` | Pulse width for square (0.5 = classic square); ignored by other waves |
 | `filtenvamt <signed>` | Filter envelope amount in octaves, e.g. `filtenvamt 3` or `filtenvamt -2` |
 | `filtenvattack <ms>` | Filter envelope attack time |
 | `filtenvdecay <ms>` | Filter envelope decay time |
@@ -139,6 +140,7 @@ res 0.4
 attack 5
 release 400
 wave square
+pulse 0.2
 show
 random
 ```

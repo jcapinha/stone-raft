@@ -3,17 +3,28 @@
 pub enum Waveform {
     Saw,
     Square,
+    Triangle,
+    Sine,
 }
 
-/// PolyBLEP band-limited oscillator (saw or square).
+/// Minimum / maximum pulse width so a square never collapses to silence or DC.
+pub const PULSE_WIDTH_MIN: f32 = 0.05;
+pub const PULSE_WIDTH_MAX: f32 = 0.95;
+pub const PULSE_WIDTH_DEFAULT: f32 = 0.5;
+
+const TWO_PI: f32 = 6.283_185_5;
+
+/// Band-limited oscillator: PolyBLEP saw/square, PolyBLAMP triangle, pure sine.
 ///
 /// Naive digital saw/square waves create harsh extra frequencies (aliasing),
-/// especially on high notes. PolyBLEP corrects the edges cheaply so the filter
-/// and envelope are easier to hear.
+/// especially on high notes. PolyBLEP corrects value jumps at edges; PolyBLAMP
+/// corrects slope jumps at triangle corners. Sine has no sharp edges, so it
+/// needs no correction.
 pub struct Oscillator {
     phase: f32,
     phase_increment: f32,
     waveform: Waveform,
+    pulse_width: f32,
 }
 
 impl Oscillator {
@@ -22,6 +33,7 @@ impl Oscillator {
             phase: 0.0,
             phase_increment: 0.0,
             waveform,
+            pulse_width: PULSE_WIDTH_DEFAULT,
         };
         osc.set_frequency(sample_rate_hz, frequency_hz);
         osc
@@ -33,6 +45,10 @@ impl Oscillator {
 
     pub fn set_waveform(&mut self, waveform: Waveform) {
         self.waveform = waveform;
+    }
+
+    pub fn set_pulse_width(&mut self, width: f32) {
+        self.pulse_width = width.clamp(PULSE_WIDTH_MIN, PULSE_WIDTH_MAX);
     }
 
     /// Advances one sample and returns a value in roughly [-1.0, 1.0].
@@ -48,12 +64,27 @@ impl Oscillator {
                 value
             }
             Waveform::Square => {
-                // Naive square, PolyBLEP at rising (t=0) and falling (t=0.5) edges.
-                let mut value = if t < 0.5 { 1.0 } else { -1.0 };
+                // Variable-duty pulse: high for `pulse_width` of the cycle.
+                let pw = self.pulse_width;
+                let mut value = if t < pw { 1.0 } else { -1.0 };
+                // Rising edge at t=0, falling edge at t=pw.
                 value += poly_blep(t, dt);
-                value -= poly_blep((t + 0.5) % 1.0, dt);
+                value -= poly_blep((t + (1.0 - pw)) % 1.0, dt);
                 value
             }
+            Waveform::Triangle => {
+                // Naive triangle in [-1, 1]; PolyBLAMP at slope corners (0 and 0.5).
+                let mut value = if t < 0.5 {
+                    4.0 * t - 1.0
+                } else {
+                    3.0 - 4.0 * t
+                };
+                // Slope jumps by ±8 at the corners; scale the unit PolyBLAMP residual.
+                value += 8.0 * dt * poly_blamp(t, dt);
+                value -= 8.0 * dt * poly_blamp((t + 0.5) % 1.0, dt);
+                value
+            }
+            Waveform::Sine => libm::sinf(TWO_PI * t),
         };
 
         self.phase += dt;
@@ -75,6 +106,26 @@ fn poly_blep(t: f32, dt: f32) -> f32 {
     } else if t > 1.0 - dt {
         let t = (t - 1.0) / dt;
         t * t + 2.0 * t + 1.0
+    } else {
+        0.0
+    }
+}
+
+/// Polynomial BLAMP correction near a unit slope discontinuity at phase 0.
+///
+/// PolyBLEP fixes a jump in level; PolyBLAMP fixes a jump in slope (as at a
+/// triangle corner). Multiply by the size of the slope change (and by `dt`
+/// when using this dimensionless residual form).
+fn poly_blamp(t: f32, dt: f32) -> f32 {
+    if dt <= 0.0 {
+        return 0.0;
+    }
+    if t < dt {
+        let t = t / dt - 1.0;
+        -(t * t * t) / 3.0
+    } else if t > 1.0 - dt {
+        let t = (t - 1.0) / dt + 1.0;
+        (t * t * t) / 3.0
     } else {
         0.0
     }

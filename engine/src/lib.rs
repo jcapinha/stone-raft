@@ -8,7 +8,9 @@ mod oscillator;
 pub use envelope::{Adsr, AdsrTimes, EnvelopeStage, velocity_to_amp};
 pub use filter::Svf;
 pub use mixer::{ENGINE_COUNT, Mixer, MixerEvent, SlotEvent};
-pub use oscillator::{Oscillator, Waveform};
+pub use oscillator::{
+    Oscillator, PULSE_WIDTH_DEFAULT, PULSE_WIDTH_MAX, PULSE_WIDTH_MIN, Waveform,
+};
 
 use envelope::velocity_to_amp as vel_amp;
 use filter::Svf as VoiceFilter;
@@ -67,6 +69,9 @@ pub enum ControlEvent {
     },
     SetWave {
         waveform: Waveform,
+    },
+    SetPulse {
+        width: f32,
     },
     SetEnvelope {
         which: EnvelopeId,
@@ -150,6 +155,7 @@ impl Voice {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EngineParams {
     pub waveform: Waveform,
+    pub pulse_width: f32,
     pub cutoff_hz: f32,
     pub resonance: f32,
     pub amp: AdsrTimes,
@@ -166,6 +172,7 @@ impl Default for EngineParams {
     fn default() -> Self {
         Self {
             waveform: Waveform::Saw,
+            pulse_width: PULSE_WIDTH_DEFAULT,
             cutoff_hz: 2_000.0,
             resonance: 0.2,
             amp: AdsrTimes::default(),
@@ -203,6 +210,10 @@ impl EngineParams {
             }
             ControlEvent::SetWave { waveform } => {
                 self.waveform = waveform;
+                true
+            }
+            ControlEvent::SetPulse { width } => {
+                self.pulse_width = width.clamp(PULSE_WIDTH_MIN, PULSE_WIDTH_MAX);
                 true
             }
             ControlEvent::SetEnvelope { which, times } => {
@@ -332,6 +343,12 @@ impl Engine {
                     voice.oscillator.set_waveform(waveform);
                 }
             }
+            ControlEvent::SetPulse { width } => {
+                let _ = self.params.apply(event);
+                for voice in self.voices.iter_mut() {
+                    voice.oscillator.set_pulse_width(width);
+                }
+            }
             ControlEvent::SetEnvelope { .. }
             | ControlEvent::PatchEnvelope { .. }
             | ControlEvent::EnvCopy => {
@@ -438,10 +455,12 @@ impl Engine {
     fn start_voice(&mut self, index: usize, note: u8, velocity: u8, age: u32) {
         let sample_rate = self.sample_rate_hz;
         let waveform = self.params.waveform;
+        let pulse_width = self.params.pulse_width;
         let base_hz = midi_note_to_hz(note);
 
         let voice = &mut self.voices[index];
         voice.oscillator = VoiceOsc::new(sample_rate, base_hz, waveform);
+        voice.oscillator.set_pulse_width(pulse_width);
         voice.filter.reset();
         apply_envelope_params_to_voice(voice, &self.params);
         voice.amp.note_on();
@@ -552,6 +571,10 @@ mod tests {
         engine.apply(ControlEvent::SetWave { waveform });
     }
 
+    fn set_pulse(engine: &mut Engine, width: f32) {
+        engine.apply(ControlEvent::SetPulse { width });
+    }
+
     fn set_cutoff(engine: &mut Engine, hz: f32) {
         engine.apply(ControlEvent::SetCutoff { hz });
     }
@@ -632,14 +655,135 @@ mod tests {
                 "sample {sample} escaped a safe range"
             );
         }
-        osc.set_waveform(Waveform::Square);
-        for _ in 0..10_000 {
-            let sample = osc.next_sample();
-            assert!(
-                (-1.5..=1.5).contains(&sample),
-                "sample {sample} escaped a safe range"
-            );
+        for waveform in [
+            Waveform::Square,
+            Waveform::Triangle,
+            Waveform::Sine,
+        ] {
+            osc.set_waveform(waveform);
+            osc.set_pulse_width(0.15);
+            for _ in 0..10_000 {
+                let sample = osc.next_sample();
+                assert!(
+                    (-1.5..=1.5).contains(&sample),
+                    "sample {sample} escaped a safe range for {waveform:?}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn pulse_width_clamps_to_safe_range() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_pulse(&mut engine, 0.0);
+        assert!((engine.params().pulse_width - PULSE_WIDTH_MIN).abs() < f32::EPSILON);
+        set_pulse(&mut engine, 1.0);
+        assert!((engine.params().pulse_width - PULSE_WIDTH_MAX).abs() < f32::EPSILON);
+        set_pulse(&mut engine, 0.25);
+        assert!((engine.params().pulse_width - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn pulse_width_changes_harmonic_energy() {
+        let mut narrow = Engine::new(SAMPLE_RATE_HZ);
+        let mut wide = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut narrow, &mut wide] {
+            set_wave(engine, Waveform::Square);
+            set_fast_amp_sustain(engine);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
+        }
+        set_pulse(&mut narrow, 0.1);
+        set_pulse(&mut wide, 0.9);
+        note_on(&mut narrow, 48, 127);
+        note_on(&mut wide, 48, 127);
+        for _ in 0..2_000 {
+            narrow.next_sample();
+            wide.next_sample();
+        }
+        let narrow_samples = take_samples(&mut narrow, ANALYSIS_SAMPLES);
+        let wide_samples = take_samples(&mut wide, ANALYSIS_SAMPLES);
+        // Asymmetric pulses emphasize even harmonics; 50% square would cancel them.
+        // Compare 2nd harmonic energy — narrow and wide (mirrored duties) should both
+        // be strong and similar, while differing from a 50% square.
+        let mut fifty = Engine::new(SAMPLE_RATE_HZ);
+        set_wave(&mut fifty, Waveform::Square);
+        set_pulse(&mut fifty, 0.5);
+        set_fast_amp_sustain(&mut fifty);
+        set_cutoff(&mut fifty, 10_000.0);
+        set_res(&mut fifty, 0.0);
+        note_on(&mut fifty, 48, 127);
+        for _ in 0..2_000 {
+            fifty.next_sample();
+        }
+        let fifty_samples = take_samples(&mut fifty, ANALYSIS_SAMPLES);
+        let h2 = midi_note_to_hz(48) * 2.0;
+        let narrow_h2 = tone_strength(&narrow_samples, h2);
+        let wide_h2 = tone_strength(&wide_samples, h2);
+        let fifty_h2 = tone_strength(&fifty_samples, h2);
+        assert!(
+            narrow_h2 > fifty_h2 * 2.0,
+            "narrow pulse should have more 2nd harmonic than 50% square; narrow={narrow_h2} fifty={fifty_h2}"
+        );
+        assert!(
+            wide_h2 > fifty_h2 * 2.0,
+            "wide pulse should have more 2nd harmonic than 50% square; wide={wide_h2} fifty={fifty_h2}"
+        );
+    }
+
+    #[test]
+    fn triangle_has_less_high_harmonic_energy_than_saw() {
+        let mut saw = Engine::new(SAMPLE_RATE_HZ);
+        let mut triangle = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut saw, &mut triangle] {
+            set_fast_amp_sustain(engine);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
+        }
+        set_wave(&mut saw, Waveform::Saw);
+        set_wave(&mut triangle, Waveform::Triangle);
+        note_on(&mut saw, 48, 127);
+        note_on(&mut triangle, 48, 127);
+        for _ in 0..2_000 {
+            saw.next_sample();
+            triangle.next_sample();
+        }
+        let saw_samples = take_samples(&mut saw, ANALYSIS_SAMPLES);
+        let tri_samples = take_samples(&mut triangle, ANALYSIS_SAMPLES);
+        let h5 = midi_note_to_hz(48) * 5.0;
+        let saw_h5 = tone_strength(&saw_samples, h5);
+        let tri_h5 = tone_strength(&tri_samples, h5);
+        assert!(
+            tri_h5 < saw_h5 * 0.5,
+            "triangle should be softer at the 5th harmonic than saw; saw={saw_h5} tri={tri_h5}"
+        );
+    }
+
+    #[test]
+    fn sine_concentrates_energy_at_fundamental() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_wave(&mut engine, Waveform::Sine);
+        set_fast_amp_sustain(&mut engine);
+        set_cutoff(&mut engine, 12_000.0);
+        set_res(&mut engine, 0.0);
+        let note = 57u8;
+        note_on(&mut engine, note, 127);
+        for _ in 0..2_000 {
+            engine.next_sample();
+        }
+        let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
+        let fund = midi_note_to_hz(note);
+        let h5 = fund * 5.0;
+        let fund_strength = tone_strength(&samples, fund);
+        let h5_strength = tone_strength(&samples, h5);
+        assert!(
+            fund_strength > TONE_PRESENT,
+            "sine should have clear fundamental; strength={fund_strength}"
+        );
+        assert!(
+            h5_strength < fund_strength * 0.1,
+            "sine should have little 5th harmonic; fund={fund_strength} h5={h5_strength}"
+        );
     }
 
     #[test]

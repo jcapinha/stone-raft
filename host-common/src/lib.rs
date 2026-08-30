@@ -35,7 +35,14 @@ const RANDOM_RES_AMT_MAX: f32 = 1.0;
 const RANDOM_VOL_MIN: f32 = 0.2;
 const RANDOM_VOL_MAX: f32 = 1.0;
 
-const RANDOM_WAVEFORMS: [Waveform; 2] = [Waveform::Saw, Waveform::Square];
+const RANDOM_WAVEFORMS: [Waveform; 4] = [
+    Waveform::Saw,
+    Waveform::Square,
+    Waveform::Triangle,
+    Waveform::Sine,
+];
+const RANDOM_PULSE_MIN: f32 = 0.05;
+const RANDOM_PULSE_MAX: f32 = 0.95;
 const RANDOM_ENV3_DESTS: [Env3Dest; 4] = [
     Env3Dest::Off,
     Env3Dest::Resonance,
@@ -347,7 +354,7 @@ fn print_param_help() {
     println!("  show             print qualified patch from host copy");
     println!("  random           fill params + vol (0.2-1.0); prints eng N lines");
     println!("Param commands (optional eng N prefix is one-shot):");
-    println!("  cutoff <Hz>   res <0..1>   wave saw|square");
+    println!("  cutoff <Hz>   res <0..1>   wave saw|square|triangle|sine   pulse <0.05..0.95>");
     println!("  attack <ms>   decay <ms>   sustain <0..1>   release <ms>");
     println!(
         "  filtenvamt <signed octaves>   filtenvattack/decay/release <ms>   filtenvsustain <0..1>"
@@ -696,6 +703,8 @@ fn wave_name(waveform: Waveform) -> &'static str {
     match waveform {
         Waveform::Saw => "saw",
         Waveform::Square => "square",
+        Waveform::Triangle => "triangle",
+        Waveform::Sine => "sine",
     }
 }
 
@@ -723,6 +732,7 @@ fn format_param_lines(params: &EngineParams) -> String {
     let link_name = if params.env_link { "on" } else { "off" };
     format!(
         "wave {}\n\
+         pulse {:.2}\n\
          cutoff {:.0}\n\
          res {:.2}\n\
          attack {:.0}\n\
@@ -743,6 +753,7 @@ fn format_param_lines(params: &EngineParams) -> String {
          envvel {:.2}\n\
          envlink {link_name}\n",
         wave_name(params.waveform),
+        params.pulse_width,
         params.cutoff_hz,
         params.resonance,
         params.amp.attack_ms,
@@ -794,6 +805,7 @@ fn wrap_engine(slot: usize, event: ControlEvent) -> MixerEvent {
 
 fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
     let waveform = RANDOM_WAVEFORMS[rng.gen_range(0..RANDOM_WAVEFORMS.len())];
+    let pulse_width = rng.gen_range(RANDOM_PULSE_MIN..=RANDOM_PULSE_MAX);
     let cutoff_hz = log_uniform(rng, RANDOM_CUTOFF_MIN_HZ, RANDOM_CUTOFF_MAX_HZ);
     let resonance = rng.gen_range(0.0..=RANDOM_RES_MAX);
     let amp = random_adsr(rng);
@@ -812,6 +824,7 @@ fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
     let volume = rng.gen_range(RANDOM_VOL_MIN..=RANDOM_VOL_MAX);
     let params = EngineParams {
         waveform,
+        pulse_width,
         cutoff_hz,
         resonance,
         amp,
@@ -829,6 +842,7 @@ fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
 
     let mut events = vec![
         wrap_engine(slot, ControlEvent::SetWave { waveform }),
+        wrap_engine(slot, ControlEvent::SetPulse { width: pulse_width }),
         wrap_engine(slot, ControlEvent::SetCutoff { hz: cutoff_hz }),
         wrap_engine(slot, ControlEvent::SetResonance { amount: resonance }),
         wrap_engine(
@@ -907,13 +921,25 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
         "sustain" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Sustain, arg, "sustain"),
         "release" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Release, arg, "release"),
         "wave" => {
-            let name = arg.ok_or_else(|| "wave needs saw or square".to_string())?;
+            let name = arg.ok_or_else(|| {
+                "wave needs saw, square, triangle, or sine".to_string()
+            })?;
             let waveform = match name.to_ascii_lowercase().as_str() {
                 "saw" => Waveform::Saw,
                 "square" | "sq" => Waveform::Square,
-                other => return Err(format!("unknown wave '{other}' (use saw or square)")),
+                "triangle" | "tri" => Waveform::Triangle,
+                "sine" | "sin" => Waveform::Sine,
+                other => {
+                    return Err(format!(
+                        "unknown wave '{other}' (use saw, square, triangle, or sine)"
+                    ));
+                }
             };
             Ok(Some(ControlEvent::SetWave { waveform }))
+        }
+        "pulse" => {
+            let width = parse_f32_arg(arg, "pulse")?;
+            Ok(Some(ControlEvent::SetPulse { width }))
         }
         "filtenvamt" => {
             let amount = parse_f32_arg(arg, "filtenvamt")?;
@@ -1007,7 +1033,7 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             Ok(Some(ControlEvent::SetEnvVel { amount }))
         }
         other => Err(format!(
-            "unknown command '{other}' (eng, on, off, ch, vol, show, cutoff, res, attack, decay, sustain, release, wave, filtenv*, env3*, envcopy, envlink, envvel, random)"
+            "unknown command '{other}' (eng, on, off, ch, vol, show, cutoff, res, attack, decay, sustain, release, wave, pulse, filtenv*, env3*, envcopy, envlink, envvel, random)"
         )),
     }
 }
@@ -1047,6 +1073,24 @@ mod tests {
             Some(ControlEvent::SetWave {
                 waveform: Waveform::Square,
             }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("wave tri").unwrap() {
+            Some(ControlEvent::SetWave {
+                waveform: Waveform::Triangle,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("wave sin").unwrap() {
+            Some(ControlEvent::SetWave {
+                waveform: Waveform::Sine,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("pulse 0.25").unwrap() {
+            Some(ControlEvent::SetPulse { width }) => {
+                assert!((width - 0.25).abs() < f32::EPSILON)
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -1181,6 +1225,7 @@ mod tests {
         assert!(report.contains("eng "));
         assert!(report.contains("vol"));
         assert!(report.contains("wave "));
+        assert!(report.contains("pulse "));
         assert!(report.contains("cutoff "));
         assert!(report.contains("envlink "));
         assert!(report.ends_with('\n'));
@@ -1267,6 +1312,12 @@ mod tests {
                                 },
                                 ControlEvent::SetEnvLink { on: true } => saw_link_on = true,
                                 ControlEvent::SetEnvLink { on: false } => saw_link_off = true,
+                                ControlEvent::SetPulse { width } => {
+                                    assert!(
+                                        *width >= RANDOM_PULSE_MIN && *width <= RANDOM_PULSE_MAX,
+                                        "seed {seed}: pulse {width} out of range"
+                                    );
+                                }
                                 ControlEvent::SetWave { .. }
                                 | ControlEvent::NoteOn { .. }
                                 | ControlEvent::NoteOff { .. }
