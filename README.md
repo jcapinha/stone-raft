@@ -97,7 +97,9 @@ Audio outputs work the same way: one device is selected automatically; several d
 
 ### Live engine params (terminal)
 
-While audio is running, change routing and subtractive params with named line commands (no MIDI device required). Unqualified commands hit the current engine. `eng 2 cutoff 800` is one-shot and does not change current. Space is required (`eng2` is an error). `show` prints a host-side copy; `random` fills subtractive params plus volume (0.2–1.0) and prints `eng N` lines including `vol`. Neither `random` nor `show` changes on/off or listen channel. The sub (`subvol` / `suboct`) is a sine mixed under the main oscillator before the filter, not a second selectable waveform.
+While audio is running, change routing and subtractive params with named line commands (no MIDI device required). Unqualified commands hit the current engine. `eng 2 cutoff 800` is one-shot and does not change current. Space is required (`eng2` is an error). `show` prints a host-side copy; `random` fills subtractive params plus volume (0.2–1.0) and prints `eng N` lines including `vol`. Neither `random` nor `show` changes on/off or listen channel.
+
+Each engine blends four at-pitch oscillators (saw, square, triangle, sine) with levels 0 through 1. The four at-pitch levels normalize as weights, so turning one up does not pull the others down in absolute terms, but the engine scales so their sum stays near full scale. Sub (`subvol` / `suboct`) is a sine mixed additively on top, before the filter. Level 0 skips that oscillator's DSP. `wave saw|square|triangle|sine` is a solo preset: chosen at-pitch level 1.0, other three 0, `subvol` 0.
 
 | Command | Meaning |
 |---------|---------|
@@ -106,15 +108,19 @@ While audio is running, change routing and subtractive params with named line co
 | `on` / `off` | Enable or disable current (`off` silences immediately) |
 | `ch <1..16>` | MIDI listen channel |
 | `vol <0..1>` | Instance volume |
-| `show` | Print a replayable qualified patch (`eng N ...` lines) |
+| `show` | Print a replayable qualified patch (`eng N ...` lines; all five osc levels) |
 | `cutoff <Hz>` | Filter cutoff, e.g. `cutoff 800` |
 | `res <0..1>` | Filter resonance, e.g. `res 0.3` |
 | `attack <ms>` | Amp envelope attack time |
 | `decay <ms>` | Amp envelope decay time |
 | `sustain <0..1>` | Amp envelope sustain level |
 | `release <ms>` | Amp envelope release time |
-| `wave saw` / `wave square` / `wave triangle` / `wave sine` | Oscillator shape for all voices (`tri` / `sin` / `sq` aliases) |
-| `pulse <0.05..0.95>` | Pulse width for square (0.5 = classic square); ignored by other waves |
+| `sawvol <0..1>` / `sawv` | Saw oscillator mix level |
+| `squarevol <0..1>` / `sqvol` | Square oscillator mix level |
+| `trianglevol <0..1>` / `trivol` | Triangle oscillator mix level |
+| `sinevol <0..1>` / `sinvol` | Sine oscillator mix level |
+| `wave saw` / `wave square` / `wave triangle` / `wave sine` | Solo preset for one at-pitch osc (`tri` / `sin` / `sq` aliases); zeros `subvol` |
+| `pulse <0.05..0.95>` | Pulse width for square (0.5 = classic square) |
 | `subvol <0..1>` | Sub oscillator (sine) mix level; 0 is silent (default) |
 | `suboct 1` / `suboct 2` | Sub one or two octaves below the sounding note (default 1) |
 | `filtenvamt <signed>` | Filter envelope amount in octaves, e.g. `filtenvamt 3` or `filtenvamt -2` |
@@ -141,7 +147,8 @@ eng 2 cutoff 1200
 res 0.4
 attack 5
 release 400
-wave square
+sawvol 0.5
+squarevol 0.5
 pulse 0.2
 show
 random

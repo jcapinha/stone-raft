@@ -35,12 +35,6 @@ const RANDOM_RES_AMT_MAX: f32 = 1.0;
 const RANDOM_VOL_MIN: f32 = 0.2;
 const RANDOM_VOL_MAX: f32 = 1.0;
 
-const RANDOM_WAVEFORMS: [Waveform; 4] = [
-    Waveform::Saw,
-    Waveform::Square,
-    Waveform::Triangle,
-    Waveform::Sine,
-];
 const RANDOM_PULSE_MIN: f32 = 0.05;
 const RANDOM_PULSE_MAX: f32 = 0.95;
 const RANDOM_ENV3_DESTS: [Env3Dest; 4] = [
@@ -354,7 +348,9 @@ fn print_param_help() {
     println!("  show             print qualified patch from host copy");
     println!("  random           fill params + vol (0.2-1.0); prints eng N lines");
     println!("Param commands (optional eng N prefix is one-shot):");
-    println!("  cutoff <Hz>   res <0..1>   wave saw|square|triangle|sine   pulse <0.05..0.95>");
+    println!("  cutoff <Hz>   res <0..1>");
+    println!("  sawvol|sawv <0..1>   squarevol|sqvol <0..1>   trianglevol|trivol <0..1>   sinevol|sinvol <0..1>");
+    println!("  wave saw|square|triangle|sine   pulse <0.05..0.95>");
     println!("  subvol <0..1>   suboct 1|2");
     println!("  attack <ms>   decay <ms>   sustain <0..1>   release <ms>");
     println!(
@@ -700,15 +696,6 @@ fn random_adsr<R: Rng>(rng: &mut R) -> AdsrTimes {
     }
 }
 
-fn wave_name(waveform: Waveform) -> &'static str {
-    match waveform {
-        Waveform::Saw => "saw",
-        Waveform::Square => "square",
-        Waveform::Triangle => "triangle",
-        Waveform::Sine => "sine",
-    }
-}
-
 fn env3_dest_name(dest: Env3Dest) -> &'static str {
     match dest {
         Env3Dest::Off => "off",
@@ -732,7 +719,10 @@ fn qualify_block(n: usize, body: &str) -> String {
 fn format_param_lines(params: &EngineParams) -> String {
     let link_name = if params.env_link { "on" } else { "off" };
     format!(
-        "wave {}\n\
+        "sawvol {:.2}\n\
+         squarevol {:.2}\n\
+         trianglevol {:.2}\n\
+         sinevol {:.2}\n\
          pulse {:.2}\n\
          subvol {:.2}\n\
          suboct {}\n\
@@ -755,7 +745,10 @@ fn format_param_lines(params: &EngineParams) -> String {
          env3release {:.0}\n\
          envvel {:.2}\n\
          envlink {link_name}\n",
-        wave_name(params.waveform),
+        params.saw_vol,
+        params.square_vol,
+        params.triangle_vol,
+        params.sine_vol,
         params.pulse_width,
         params.sub_vol,
         params.sub_octaves.as_u8(),
@@ -809,7 +802,10 @@ fn wrap_engine(slot: usize, event: ControlEvent) -> MixerEvent {
 }
 
 fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
-    let waveform = RANDOM_WAVEFORMS[rng.gen_range(0..RANDOM_WAVEFORMS.len())];
+    let saw_vol = rng.gen_range(0.0..=1.0);
+    let square_vol = rng.gen_range(0.0..=1.0);
+    let triangle_vol = rng.gen_range(0.0..=1.0);
+    let sine_vol = rng.gen_range(0.0..=1.0);
     let pulse_width = rng.gen_range(RANDOM_PULSE_MIN..=RANDOM_PULSE_MAX);
     let cutoff_hz = log_uniform(rng, RANDOM_CUTOFF_MIN_HZ, RANDOM_CUTOFF_MAX_HZ);
     let resonance = rng.gen_range(0.0..=RANDOM_RES_MAX);
@@ -834,7 +830,10 @@ fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
     };
     let volume = rng.gen_range(RANDOM_VOL_MIN..=RANDOM_VOL_MAX);
     let params = EngineParams {
-        waveform,
+        saw_vol,
+        square_vol,
+        triangle_vol,
+        sine_vol,
         pulse_width,
         cutoff_hz,
         resonance,
@@ -854,7 +853,15 @@ fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
     report.push_str(&qualify_block(n, &format_param_lines(&params)));
 
     let mut events = vec![
-        wrap_engine(slot, ControlEvent::SetWave { waveform }),
+        wrap_engine(slot, ControlEvent::SetSawVol { amount: saw_vol }),
+        wrap_engine(slot, ControlEvent::SetSquareVol { amount: square_vol }),
+        wrap_engine(
+            slot,
+            ControlEvent::SetTriangleVol {
+                amount: triangle_vol,
+            },
+        ),
+        wrap_engine(slot, ControlEvent::SetSineVol { amount: sine_vol }),
         wrap_engine(slot, ControlEvent::SetPulse { width: pulse_width }),
         wrap_engine(slot, ControlEvent::SetSubVol { amount: sub_vol }),
         wrap_engine(slot, ControlEvent::SetSubOct { octaves: sub_octaves }),
@@ -935,6 +942,22 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
         "decay" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Decay, arg, "decay"),
         "sustain" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Sustain, arg, "sustain"),
         "release" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Release, arg, "release"),
+        "sawvol" | "sawv" => {
+            let amount = parse_f32_arg(arg, "sawvol")?;
+            Ok(Some(ControlEvent::SetSawVol { amount }))
+        }
+        "squarevol" | "sqvol" => {
+            let amount = parse_f32_arg(arg, "squarevol")?;
+            Ok(Some(ControlEvent::SetSquareVol { amount }))
+        }
+        "trianglevol" | "trivol" => {
+            let amount = parse_f32_arg(arg, "trianglevol")?;
+            Ok(Some(ControlEvent::SetTriangleVol { amount }))
+        }
+        "sinevol" | "sinvol" => {
+            let amount = parse_f32_arg(arg, "sinevol")?;
+            Ok(Some(ControlEvent::SetSineVol { amount }))
+        }
         "wave" => {
             let name = arg.ok_or_else(|| {
                 "wave needs saw, square, triangle, or sine".to_string()
@@ -1063,7 +1086,7 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             Ok(Some(ControlEvent::SetEnvVel { amount }))
         }
         other => Err(format!(
-            "unknown command '{other}' (eng, on, off, ch, vol, show, cutoff, res, attack, decay, sustain, release, wave, pulse, subvol, suboct, filtenv*, env3*, envcopy, envlink, envvel, random)"
+            "unknown command '{other}' (eng, on, off, ch, vol, show, cutoff, res, attack, decay, sustain, release, sawvol, squarevol, trianglevol, sinevol, wave, pulse, subvol, suboct, filtenv*, env3*, envcopy, envlink, envvel, random)"
         )),
     }
 }
@@ -1115,6 +1138,36 @@ mod tests {
             Some(ControlEvent::SetWave {
                 waveform: Waveform::Sine,
             }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("sawvol 0.5").unwrap() {
+            Some(ControlEvent::SetSawVol { amount }) => {
+                assert!((amount - 0.5).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("sawv 0.3").unwrap() {
+            Some(ControlEvent::SetSawVol { amount }) => {
+                assert!((amount - 0.3).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("sqvol 0.7").unwrap() {
+            Some(ControlEvent::SetSquareVol { amount }) => {
+                assert!((amount - 0.7).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("trivol 0.2").unwrap() {
+            Some(ControlEvent::SetTriangleVol { amount }) => {
+                assert!((amount - 0.2).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("sinvol 0.8").unwrap() {
+            Some(ControlEvent::SetSineVol { amount }) => {
+                assert!((amount - 0.8).abs() < f32::EPSILON)
+            }
             other => panic!("unexpected {other:?}"),
         }
         match parse_param_command("pulse 0.25").unwrap() {
@@ -1274,7 +1327,10 @@ mod tests {
         let report = report_text(&patch);
         assert!(report.contains("eng "));
         assert!(report.contains("vol"));
-        assert!(report.contains("wave "));
+        assert!(report.contains("sawvol "));
+        assert!(report.contains("squarevol "));
+        assert!(report.contains("trianglevol "));
+        assert!(report.contains("sinevol "));
         assert!(report.contains("pulse "));
         assert!(report.contains("subvol "));
         assert!(report.contains("suboct "));
@@ -1295,6 +1351,7 @@ mod tests {
             let mut env3_dest = Env3Dest::Off;
             let mut saw_volume = false;
 
+            let mut saw_osc_levels = 0usize;
             for event in &patch.events {
                 match event {
                     MixerEvent::ToSlot { slot, event } => {
@@ -1382,6 +1439,16 @@ mod tests {
                                         "seed {seed}: unexpected suboct {octaves:?}"
                                     );
                                 }
+                                ControlEvent::SetSawVol { amount }
+                                | ControlEvent::SetSquareVol { amount }
+                                | ControlEvent::SetTriangleVol { amount }
+                                | ControlEvent::SetSineVol { amount } => {
+                                    assert!(
+                                        *amount >= 0.0 && *amount <= 1.0,
+                                        "seed {seed}: osc level {amount} out of range"
+                                    );
+                                    saw_osc_levels += 1;
+                                }
                                 ControlEvent::SetWave { .. }
                                 | ControlEvent::NoteOn { .. }
                                 | ControlEvent::NoteOff { .. }
@@ -1397,9 +1464,15 @@ mod tests {
             }
 
             assert!(saw_volume, "seed {seed}: random must include volume");
+            assert_eq!(
+                saw_osc_levels, 4,
+                "seed {seed}: random must emit four at-pitch osc level events"
+            );
             let report = report_text(&patch);
             assert!(report.contains("eng "));
             assert!(report.contains("vol"));
+            assert!(report.contains("sawvol "));
+            assert!(report.contains("squarevol "));
             assert!(report.contains("subvol "));
             assert!(report.contains("suboct "));
             assert!(

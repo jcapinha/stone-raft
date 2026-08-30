@@ -62,15 +62,21 @@ The filter frequency above which a lowpass turns brightness down.
 **Resonance**:
 How much the filter boosts frequencies near the cutoff.
 
+**Oscillator mix**:
+Per-engine blend of saw, square, triangle, and sine at the note pitch. Each has a level 0 through 1, shared by all voices in that engine. The four at-pitch levels normalize as weights (turning one up does not pull others down in absolute terms, but the engine scales so their sum stays near full scale). Sub mixes on top separately. Level 0 skips that oscillator’s DSP.
+_Avoid_: wave switch (solo mode uses the `wave` preset command instead)
+
 **Pulse width**:
-How wide the high part of a square cycle is (`0.5` is a classic square; thinner values sound sharper). Only affects `wave square`. Clamped away from 0 and 1 so the wave does not go silent.
+How wide the high part of a square cycle is (`0.5` is a classic square; thinner values sound sharper). Only affects the square oscillator in the mix. Clamped away from 0 and 1 so the wave does not go silent.
 
 **Sub oscillator**:
-Extra sine per voice, one or two octaves below the sounding pitch, mixed with the main oscillator before the filter. Volume 0 is silent.
-_Avoid_: osc 2, second oscillator (those wait for dual-oscillator mix)
+Sine per voice, one or two octaves below the sounding pitch, mixed additively after the normalized at-pitch blend and before the filter. Not part of the four-way normalization. Volume 0 is silent.
+
+**Osc level**:
+Mix level for one oscillator in the mix (`sawvol`, `squarevol`, `trianglevol`, `sinevol`, or `subvol`). 0 through 1. Separate from instance `vol`.
 
 **Sub volume**:
-Mix level of the sub sine, 0 through 1. Separate from instance `vol`.
+Osc level for the sub sine (`subvol`). Additive on top of the normalized at-pitch mix.
 
 **Sub octave**:
 1 or 2 octaves below the sounding pitch.
@@ -93,16 +99,19 @@ A Cargo workspace with a shared `engine` crate, shared laptop host plumbing in `
 The engine is written in no_std style (fixed-size data, no heap, minimal dependencies) from day one, so the exact same DSP runs on the laptop and the Daisy. FunDSP may be studied as a reference but is not a dependency.
 
 **Subtractive engine path and roadmap**
-The first engine is subtractive: main oscillator per voice (PolyBLEP saw or square with pulse width, PolyBLAMP triangle, or pure sine; live waveform select) plus a dedicated sine sub mixed before a per-voice state-variable filter (SVF), then a full amp ADSR with exponential-ish segments, then summed. Velocity scales amp with a curved mapping (unit-tested; keyboard still uses fixed velocity). Each voice has three ADSRs: amp, a dedicated filter envelope, and an assignable envelope. Key tracking is later. Planned later on the same recipe: dual-oscillator mix, a learning look at Moog-style ladder filters, and a possible reevaluation of heavier band-limited oscillators. Wavetable remains a separate future engine.
+The first engine is subtractive: per-engine oscillator mix (PolyBLEP saw and square with pulse width, PolyBLAMP triangle, pure sine, plus additive sub) into a per-voice state-variable filter (SVF), then a full amp ADSR with exponential-ish segments, then summed. Velocity scales amp with a curved mapping (unit-tested; keyboard still uses fixed velocity). Each voice has three ADSRs: amp, a dedicated filter envelope, and an assignable envelope. Key tracking is later. Planned later on the same recipe: a learning look at Moog-style ladder filters, and a possible reevaluation of heavier band-limited oscillators. Wavetable remains a separate future engine.
+
+**Per-engine oscillator mix**
+Five sources per engine: saw, square, triangle, and sine at pitch (levels normalize as weights), plus sub (additive via `subvol`, not in that normalization). Levels are per engine instance, shared by all voices. Default: `sawvol` 1.0, other at-pitch levels 0, `subvol` 0. Level 0 skips that oscillator’s DSP. `wave saw|square|triangle|sine` is a preset shortcut: chosen at-pitch level 1.0, other three 0, `subvol` 0. Pulse width still square-only.
 
 **Dedicated sine sub oscillator**
-Each voice has a sine sub mixed with the main oscillator before the filter. Sub pitch tracks the sounding frequency (including env3 pitch), one or two octaves down. `subvol` is 0..1 (default 0, independent add); when 0 the sine sample math is skipped. `suboct` is 1 or 2 (default 1). Not oscillator 2; dual-oscillator mix stays later.
+Each voice has a sine sub mixed after the normalized at-pitch blend and before the filter. Sub pitch tracks the sounding frequency (including env3 pitch), one or two octaves down. `subvol` is 0..1 (default 0, additive); when 0 the sine sample math is skipped. `suboct` is 1 or 2 (default 1).
 
 **Filter and assignable envelopes**
 Three ADSRs per voice. Amp owns voice lifetime. Cutoff uses exponential signed-octave modulation; stacking adds octave offsets. Assignable dests are off, resonance, pitch, and cutoff. Times are independent. `envcopy` snapshots amp times onto the other two. `envlink` snaps then follows amp time commands; a filtenv* or env3* time command unlinks. Shared `envvel` defaults to 0; split fvel/e3vel later if needed. Key tracking is not in this slice.
 
 **Terminal param control for laptop development**
-Laptop hosts (via `host-common`) change engine params with named line commands. Commands target a current engine (`eng 1` through `eng 4`, 1-based, space required). Unqualified commands hit current. `eng 2 cutoff 800` is one-shot and does not change current. Routing commands: `on`, `off`, `ch <1..16>`, `vol <0..1>`. Oscillator commands: `wave saw|square|triangle|sine` (short aliases allowed) and `pulse <0.05..0.95>` for square duty. Sub commands: `subvol <0..1>` and `suboct 1|2`. `show` prints a replayable qualified patch from a host-side copy (including subvol and suboct). `random` fills subtractive params (including wave, pulse, subvol, and suboct) plus volume (0.2–1.0) and does not change on/off or listen channel. Printed patches use `eng N ...` lines. Same commands on `host-wsl` and `host-windows`. Real MIDI CC from the Polyend or other devices are a later session. High-rate knobs/CC may later use atomics plus smoothing; discrete commands and note events use the SPSC queue now.
+Laptop hosts (via `host-common`) change engine params with named line commands. Commands target a current engine (`eng 1` through `eng 4`, 1-based, space required). Unqualified commands hit current. `eng 2 cutoff 800` is one-shot and does not change current. Routing commands: `on`, `off`, `ch <1..16>`, `vol <0..1>`. Oscillator mix: `sawvol`/`sawv`, `squarevol`/`sqvol`, `trianglevol`/`trivol`, `sinevol`/`sinvol`, and `subvol` (each `<0..1>`). `wave saw|square|triangle|sine` is a solo preset (one at-pitch level 1.0, others 0, `subvol` 0). `pulse <0.05..0.95>` for square duty. `suboct 1|2`. `show` prints a replayable qualified patch from a host-side copy (all five osc levels, suboct, and other subtractive params). `random` fills subtractive params including random levels for all five oscs plus volume (0.2–1.0) and does not change on/off or listen channel. Printed patches use `eng N ...` lines with full osc level names. Same commands on `host-wsl` and `host-windows`. Real MIDI CC from the Polyend or other devices are a later session. High-rate knobs/CC may later use atomics plus smoothing; discrete commands and note events use the SPSC queue now.
 
 **Multitimbral routing with per-engine volume**
 Four engine instances live in a mixer in the `engine` crate. Instance 1 starts enabled on listen channel 1. Instances 2–4 start disabled, with listen channels 2, 3, and 4 pre-set. MIDI notes fan out to every enabled instance whose listen channel matches. Disabled instances are skipped in the audio loop and ignore notes. `off` silences that instance immediately. Volume is per instance via terminal `vol` (default 1.0). MIDI CC volume waits with the rest of CC mapping. Physical knobs later.
