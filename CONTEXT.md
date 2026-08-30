@@ -1,6 +1,6 @@
 # stone-raft
 
-Personal experiment: a portable hardware synthesizer built on a Daisy Seed, played as a companion to the author's Polyend Play. It receives MIDI and produces several different sounds at once, one per MIDI channel. Built in Rust as a learn-as-you-go first Rust project.
+Personal experiment: a portable hardware synthesizer built on a Daisy Seed 3, played as a companion to the author's Polyend Play. It receives MIDI and produces several different sounds at once, one per MIDI channel. Built in Rust as a learn-as-you-go first Rust project.
 
 The author knows Python and data pipelines well, and does not yet know Rust or similar systems languages. There is no traditional software-engineering background. Agents should explain trade-offs in plain language and teach while deciding.
 
@@ -90,7 +90,9 @@ A sound recipe that sweeps through stored waveforms for evolving tones. Planned,
 The project is intentionally a first Rust codebase. The goal is to learn the language by building something real (a hardware synth), not to ship the fastest prototype in a familiar stack. Python stays a useful analogy for agents when explaining concepts, not a candidate runtime for the synth engine.
 
 **Daisy Seed as the hardware target**
-The instrument runs on a Daisy Seed (Rev7 / Seed 1.2, PCM3060 codec). Chosen for a portable, instant-on instrument with onboard audio and analog knob inputs, powered from a USB powerbank. Raspberry Pi remains a known fallback if embedded Rust proves too hard; the portable engine keeps that switch cheap.
+The instrument runs on a Daisy Seed 3 (Seed3). Same STM32H750 MCU as earlier Seeds, and pin-to-pin compatible with the original Seed pinout and footprint. The audio codec is the TI TAC5242: hardware-strapped, no I2C, up to 32-bit / 192 kHz. Firmware must use the Seed 3 SAI setup (`host-daisy` via daisy-embassy with the `seed3` feature). The engine still starts at 48 kHz mono as decided below. Chosen for a portable, instant-on instrument with onboard audio, powered from a USB powerbank over USB-C. Raspberry Pi remains a known fallback if embedded Rust proves too hard; the portable engine keeps that switch cheap.
+
+Board docs: [Seed3](https://docs.daisy.audio/hardware/Seed3/), [Daisy documentation](https://docs.daisy.audio/), [Seed pinout CSV](https://github.com/electro-smith/DaisyWiki/blob/master/resources/Daisy_Seed_Pinout.csv). [libdaisy-rust](https://github.com/mtthw-meyer/libdaisy-rust) is a reference HAL only; it is not the Daisy host stack.
 
 **Laptop-first, layered architecture**
 A Cargo workspace with a shared `engine` crate, shared laptop host plumbing in `host-common`, and thin binaries `host-wsl` and `host-windows` (cpal/midir). Port to the Daisy last (`host-daisy`, daisy-embassy). The engine is the reusable brain; hosts are swappable plumbing. Reevaluate keeping both laptop hosts once the Daisy is in hand.
