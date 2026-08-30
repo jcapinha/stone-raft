@@ -34,6 +34,30 @@ pub enum Env3Dest {
     Cutoff,
 }
 
+/// How many octaves below the sounding pitch the sub oscillator sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubOctaves {
+    One,
+    Two,
+}
+
+impl SubOctaves {
+    /// Frequency divisor: one octave = /2, two octaves = /4.
+    pub fn frequency_divisor(self) -> f32 {
+        match self {
+            SubOctaves::One => 2.0,
+            SubOctaves::Two => 4.0,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        match self {
+            SubOctaves::One => 1,
+            SubOctaves::Two => 2,
+        }
+    }
+}
+
 /// Which of the three ADSRs on a voice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvelopeId {
@@ -98,6 +122,12 @@ pub enum ControlEvent {
     SetEnvVel {
         amount: f32,
     },
+    SetSubVol {
+        amount: f32,
+    },
+    SetSubOct {
+        octaves: SubOctaves,
+    },
 }
 
 /// Converts a MIDI note number to frequency in Hz (A4 = 69 = 440 Hz).
@@ -116,6 +146,7 @@ fn effective_envelope_amount(amount: f32, envvel: f32, vel: f32) -> f32 {
 
 struct Voice {
     oscillator: VoiceOsc,
+    sub: VoiceOsc,
     filter: VoiceFilter,
     amp: Adsr,
     filter_env: Adsr,
@@ -131,6 +162,7 @@ impl Voice {
     fn new(sample_rate_hz: f32, waveform: VoiceWave) -> Self {
         Self {
             oscillator: VoiceOsc::new(sample_rate_hz, 440.0, waveform),
+            sub: VoiceOsc::new(sample_rate_hz, 220.0, VoiceWave::Sine),
             filter: VoiceFilter::new(),
             amp: Adsr::new(sample_rate_hz),
             filter_env: Adsr::new(sample_rate_hz),
@@ -166,6 +198,8 @@ pub struct EngineParams {
     pub env3_dest: Env3Dest,
     pub env_link: bool,
     pub envvel: f32,
+    pub sub_vol: f32,
+    pub sub_octaves: SubOctaves,
 }
 
 impl Default for EngineParams {
@@ -183,6 +217,8 @@ impl Default for EngineParams {
             env3_dest: Env3Dest::Off,
             env_link: false,
             envvel: 0.0,
+            sub_vol: 0.0,
+            sub_octaves: SubOctaves::One,
         }
     }
 }
@@ -260,6 +296,14 @@ impl EngineParams {
             }
             ControlEvent::SetEnvVel { amount } => {
                 self.envvel = amount.clamp(0.0, 1.0);
+                true
+            }
+            ControlEvent::SetSubVol { amount } => {
+                self.sub_vol = amount.clamp(0.0, 1.0);
+                true
+            }
+            ControlEvent::SetSubOct { octaves } => {
+                self.sub_octaves = octaves;
                 true
             }
         }
@@ -366,7 +410,9 @@ impl Engine {
             | ControlEvent::SetFiltEnvAmt { .. }
             | ControlEvent::SetEnv3Dest { .. }
             | ControlEvent::SetEnv3Amt { .. }
-            | ControlEvent::SetEnvVel { .. } => {
+            | ControlEvent::SetEnvVel { .. }
+            | ControlEvent::SetSubVol { .. }
+            | ControlEvent::SetSubOct { .. } => {
                 let _ = self.params.apply(event);
             }
         }
@@ -461,6 +507,9 @@ impl Engine {
         let voice = &mut self.voices[index];
         voice.oscillator = VoiceOsc::new(sample_rate, base_hz, waveform);
         voice.oscillator.set_pulse_width(pulse_width);
+        let sub_hz = (base_hz / self.params.sub_octaves.frequency_divisor())
+            .clamp(20.0, sample_rate * 0.25);
+        voice.sub = VoiceOsc::new(sample_rate, sub_hz, VoiceWave::Sine);
         voice.filter.reset();
         apply_envelope_params_to_voice(voice, &self.params);
         voice.amp.note_on();
@@ -485,6 +534,8 @@ impl Engine {
         let env3_amt = self.params.env3_amt;
         let env3_dest = self.params.env3_dest;
         let envvel = self.params.envvel;
+        let sub_vol = self.params.sub_vol;
+        let sub_octaves = self.params.sub_octaves;
 
         let mut mix = 0.0;
         for voice in self.voices.iter_mut() {
@@ -515,7 +566,15 @@ impl Engine {
 
             let cutoff_hz = hz_times_octaves(cutoff_base, filt_oct + env3_cutoff_oct);
             voice.oscillator.set_frequency(sample_rate, osc_hz);
-            let osc = voice.oscillator.next_sample();
+            let main = voice.oscillator.next_sample();
+            let osc = if sub_vol > 0.0 {
+                let sub_hz = (osc_hz / sub_octaves.frequency_divisor())
+                    .clamp(20.0, sample_rate * 0.25);
+                voice.sub.set_frequency(sample_rate, sub_hz);
+                main + sub_vol * voice.sub.next_sample()
+            } else {
+                main
+            };
             let filtered = voice.filter.process(osc, sample_rate, cutoff_hz, resonance);
             let amp = voice.amp.next_level();
             mix += filtered * amp * voice.velocity_amp * VOICE_AMPLITUDE;
@@ -617,6 +676,14 @@ mod tests {
         times.decay_ms = 1.0;
         times.sustain = 1.0;
         set_envelope(engine, EnvelopeId::Assignable, times);
+    }
+
+    fn set_sub_vol(engine: &mut Engine, amount: f32) {
+        engine.apply(ControlEvent::SetSubVol { amount });
+    }
+
+    fn set_sub_oct(engine: &mut Engine, octaves: SubOctaves) {
+        engine.apply(ControlEvent::SetSubOct { octaves });
     }
 
     #[test]
@@ -1178,5 +1245,161 @@ mod tests {
             quiet_at_base > quiet_at_octave,
             "low velocity with envvel 1 should stay nearer the original pitch; base={quiet_at_base} octave={quiet_at_octave}"
         );
+    }
+
+    #[test]
+    fn sub_defaults_silent_and_one_octave() {
+        let engine = Engine::new(SAMPLE_RATE_HZ);
+        assert!((engine.params().sub_vol - 0.0).abs() < f32::EPSILON);
+        assert_eq!(engine.params().sub_octaves, SubOctaves::One);
+    }
+
+    #[test]
+    fn sub_vol_zero_matches_main_only_spectrum() {
+        let mut with_sub_off = Engine::new(SAMPLE_RATE_HZ);
+        let mut main_only = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut with_sub_off, &mut main_only] {
+            set_wave(engine, Waveform::Saw);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
+            set_fast_amp_sustain(engine);
+        }
+        set_sub_vol(&mut with_sub_off, 0.0);
+        set_sub_oct(&mut with_sub_off, SubOctaves::One);
+
+        let note = 60u8;
+        note_on(&mut with_sub_off, note, 127);
+        note_on(&mut main_only, note, 127);
+        for _ in 0..2_000 {
+            with_sub_off.next_sample();
+            main_only.next_sample();
+        }
+        let off_samples = take_samples(&mut with_sub_off, ANALYSIS_SAMPLES);
+        let main_samples = take_samples(&mut main_only, ANALYSIS_SAMPLES);
+        let fund = midi_note_to_hz(note);
+        let sub_hz = fund / 2.0;
+        let off_fund = tone_strength(&off_samples, fund);
+        let main_fund = tone_strength(&main_samples, fund);
+        let off_sub = tone_strength(&off_samples, sub_hz);
+        let main_sub = tone_strength(&main_samples, sub_hz);
+        let denom = off_fund.max(main_fund).max(1e-6);
+        assert!(
+            (off_fund - main_fund).abs() / denom < 0.15,
+            "subvol 0 should match main-only fundamental; off={off_fund} main={main_fund}"
+        );
+        assert!(
+            (off_sub - main_sub).abs() < TONE_ABSENT,
+            "subvol 0 should not add sub energy; off={off_sub} main={main_sub}"
+        );
+    }
+
+    #[test]
+    fn sub_octave_one_adds_energy_at_half_frequency() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_wave(&mut engine, Waveform::Saw);
+        set_cutoff(&mut engine, 10_000.0);
+        set_res(&mut engine, 0.0);
+        set_fast_amp_sustain(&mut engine);
+        set_sub_vol(&mut engine, 1.0);
+        set_sub_oct(&mut engine, SubOctaves::One);
+
+        let note = 60u8;
+        note_on(&mut engine, note, 127);
+        for _ in 0..2_000 {
+            engine.next_sample();
+        }
+        let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
+        let fund = midi_note_to_hz(note);
+        let sub_hz = fund / 2.0;
+        let at_fund = tone_strength(&samples, fund);
+        let at_sub = tone_strength(&samples, sub_hz);
+        assert!(
+            at_sub > TONE_PRESENT,
+            "expected energy at one octave below ({sub_hz} Hz), got {at_sub}"
+        );
+        assert!(
+            at_fund > TONE_PRESENT,
+            "main fundamental should still be present; got {at_fund}"
+        );
+    }
+
+    #[test]
+    fn sub_octave_two_adds_energy_at_quarter_frequency() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_wave(&mut engine, Waveform::Saw);
+        set_cutoff(&mut engine, 10_000.0);
+        set_res(&mut engine, 0.0);
+        set_fast_amp_sustain(&mut engine);
+        set_sub_vol(&mut engine, 1.0);
+        set_sub_oct(&mut engine, SubOctaves::Two);
+
+        let note = 72u8; // higher so quarter-freq stays well above analysis floor
+        note_on(&mut engine, note, 127);
+        for _ in 0..2_000 {
+            engine.next_sample();
+        }
+        let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
+        let fund = midi_note_to_hz(note);
+        let sub_hz = fund / 4.0;
+        let at_sub = tone_strength(&samples, sub_hz);
+        let at_one_oct = tone_strength(&samples, fund / 2.0);
+        assert!(
+            at_sub > TONE_PRESENT,
+            "expected energy at two octaves below ({sub_hz} Hz), got {at_sub}"
+        );
+        assert!(
+            at_sub > at_one_oct,
+            "two-octave sub should dominate one-octave bin; sub={at_sub} one_oct={at_one_oct}"
+        );
+    }
+
+    #[test]
+    fn sub_tracks_env3_pitch_destination() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_wave(&mut engine, Waveform::Saw);
+        set_cutoff(&mut engine, 10_000.0);
+        set_res(&mut engine, 0.0);
+        set_fast_amp_sustain(&mut engine);
+        set_fast_assign_env_sustain(&mut engine);
+        engine.apply(ControlEvent::SetEnv3Dest {
+            dest: Env3Dest::Pitch,
+        });
+        engine.apply(ControlEvent::SetEnv3Amt { amount: 1.0 });
+        set_sub_vol(&mut engine, 1.0);
+        set_sub_oct(&mut engine, SubOctaves::One);
+
+        let note = 57u8;
+        note_on(&mut engine, note, 127);
+        for _ in 0..2_000 {
+            engine.next_sample();
+        }
+        let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
+        let base_hz = midi_note_to_hz(note);
+        let shifted_main = base_hz * 2.0;
+        let shifted_sub = shifted_main / 2.0; // same as base_hz, but we check relative to unshifted sub
+        let unshifted_sub = base_hz / 2.0;
+        let at_shifted_sub = tone_strength(&samples, shifted_sub);
+        let at_unshifted_sub = tone_strength(&samples, unshifted_sub);
+        // With +1 octave pitch env, main is at 2*base and sub (1 oct down) lands at base.
+        // Unshifted sub would be at base/2 and should be weaker.
+        assert!(
+            at_shifted_sub > TONE_PRESENT,
+            "sub should follow sounding pitch to {shifted_sub} Hz; got {at_shifted_sub}"
+        );
+        assert!(
+            at_shifted_sub > at_unshifted_sub,
+            "sub should track pitch env, not stay at MIDI-only sub; shifted={at_shifted_sub} frozen={at_unshifted_sub}"
+        );
+    }
+
+    #[test]
+    fn sub_vol_clamps_to_unit_range() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_sub_vol(&mut engine, -0.5);
+        assert!((engine.params().sub_vol - 0.0).abs() < f32::EPSILON);
+        set_sub_vol(&mut engine, 1.5);
+        assert!((engine.params().sub_vol - 1.0).abs() < f32::EPSILON);
+        set_sub_vol(&mut engine, 0.4);
+        assert!((engine.params().sub_vol - 0.4).abs() < f32::EPSILON);
     }
 }

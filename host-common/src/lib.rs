@@ -12,7 +12,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use engine::{
     AdsrTimes, ControlEvent, ENGINE_COUNT, EngineParams, Env3Dest, EnvelopeField, EnvelopeId,
-    Mixer, MixerEvent, SlotEvent, Waveform,
+    Mixer, MixerEvent, SlotEvent, SubOctaves, Waveform,
 };
 use midir::{MidiInput, MidiInputConnection, MidiInputPort};
 use rand::Rng;
@@ -355,6 +355,7 @@ fn print_param_help() {
     println!("  random           fill params + vol (0.2-1.0); prints eng N lines");
     println!("Param commands (optional eng N prefix is one-shot):");
     println!("  cutoff <Hz>   res <0..1>   wave saw|square|triangle|sine   pulse <0.05..0.95>");
+    println!("  subvol <0..1>   suboct 1|2");
     println!("  attack <ms>   decay <ms>   sustain <0..1>   release <ms>");
     println!(
         "  filtenvamt <signed octaves>   filtenvattack/decay/release <ms>   filtenvsustain <0..1>"
@@ -733,6 +734,8 @@ fn format_param_lines(params: &EngineParams) -> String {
     format!(
         "wave {}\n\
          pulse {:.2}\n\
+         subvol {:.2}\n\
+         suboct {}\n\
          cutoff {:.0}\n\
          res {:.2}\n\
          attack {:.0}\n\
@@ -754,6 +757,8 @@ fn format_param_lines(params: &EngineParams) -> String {
          envlink {link_name}\n",
         wave_name(params.waveform),
         params.pulse_width,
+        params.sub_vol,
+        params.sub_octaves.as_u8(),
         params.cutoff_hz,
         params.resonance,
         params.amp.attack_ms,
@@ -821,6 +826,12 @@ fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
         }
     };
     let envvel = rng.gen_range(0.0..=1.0);
+    let sub_vol = rng.gen_range(0.0..=1.0);
+    let sub_octaves = if rng.gen_bool(0.5) {
+        SubOctaves::One
+    } else {
+        SubOctaves::Two
+    };
     let volume = rng.gen_range(RANDOM_VOL_MIN..=RANDOM_VOL_MAX);
     let params = EngineParams {
         waveform,
@@ -835,6 +846,8 @@ fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
         env3_dest,
         env_link,
         envvel,
+        sub_vol,
+        sub_octaves,
     };
     let n = slot + 1;
     let mut report = qualified(n, &format!("vol {volume:.2}"));
@@ -843,6 +856,8 @@ fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
     let mut events = vec![
         wrap_engine(slot, ControlEvent::SetWave { waveform }),
         wrap_engine(slot, ControlEvent::SetPulse { width: pulse_width }),
+        wrap_engine(slot, ControlEvent::SetSubVol { amount: sub_vol }),
+        wrap_engine(slot, ControlEvent::SetSubOct { octaves: sub_octaves }),
         wrap_engine(slot, ControlEvent::SetCutoff { hz: cutoff_hz }),
         wrap_engine(slot, ControlEvent::SetResonance { amount: resonance }),
         wrap_engine(
@@ -941,6 +956,21 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             let width = parse_f32_arg(arg, "pulse")?;
             Ok(Some(ControlEvent::SetPulse { width }))
         }
+        "subvol" => {
+            let amount = parse_f32_arg(arg, "subvol")?;
+            Ok(Some(ControlEvent::SetSubVol { amount }))
+        }
+        "suboct" => {
+            let raw = arg.ok_or_else(|| "suboct needs 1 or 2".to_string())?;
+            let octaves = match raw {
+                "1" => SubOctaves::One,
+                "2" => SubOctaves::Two,
+                other => {
+                    return Err(format!("unknown suboct '{other}' (use 1 or 2)"));
+                }
+            };
+            Ok(Some(ControlEvent::SetSubOct { octaves }))
+        }
         "filtenvamt" => {
             let amount = parse_f32_arg(arg, "filtenvamt")?;
             Ok(Some(ControlEvent::SetFiltEnvAmt { amount }))
@@ -1033,7 +1063,7 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             Ok(Some(ControlEvent::SetEnvVel { amount }))
         }
         other => Err(format!(
-            "unknown command '{other}' (eng, on, off, ch, vol, show, cutoff, res, attack, decay, sustain, release, wave, pulse, filtenv*, env3*, envcopy, envlink, envvel, random)"
+            "unknown command '{other}' (eng, on, off, ch, vol, show, cutoff, res, attack, decay, sustain, release, wave, pulse, subvol, suboct, filtenv*, env3*, envcopy, envlink, envvel, random)"
         )),
     }
 }
@@ -1093,6 +1123,26 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+        match parse_param_command("subvol 0.4").unwrap() {
+            Some(ControlEvent::SetSubVol { amount }) => {
+                assert!((amount - 0.4).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("suboct 2").unwrap() {
+            Some(ControlEvent::SetSubOct {
+                octaves: SubOctaves::Two,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("suboct 1").unwrap() {
+            Some(ControlEvent::SetSubOct {
+                octaves: SubOctaves::One,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(parse_param_command("suboct 3").is_err());
+        assert!(parse_param_command("suboct 0").is_err());
     }
 
     #[test]
@@ -1226,6 +1276,8 @@ mod tests {
         assert!(report.contains("vol"));
         assert!(report.contains("wave "));
         assert!(report.contains("pulse "));
+        assert!(report.contains("subvol "));
+        assert!(report.contains("suboct "));
         assert!(report.contains("cutoff "));
         assert!(report.contains("envlink "));
         assert!(report.ends_with('\n'));
@@ -1318,6 +1370,18 @@ mod tests {
                                         "seed {seed}: pulse {width} out of range"
                                     );
                                 }
+                                ControlEvent::SetSubVol { amount } => {
+                                    assert!(
+                                        *amount >= 0.0 && *amount <= 1.0,
+                                        "seed {seed}: subvol {amount} out of range"
+                                    );
+                                }
+                                ControlEvent::SetSubOct { octaves } => {
+                                    assert!(
+                                        matches!(octaves, SubOctaves::One | SubOctaves::Two),
+                                        "seed {seed}: unexpected suboct {octaves:?}"
+                                    );
+                                }
                                 ControlEvent::SetWave { .. }
                                 | ControlEvent::NoteOn { .. }
                                 | ControlEvent::NoteOff { .. }
@@ -1336,6 +1400,8 @@ mod tests {
             let report = report_text(&patch);
             assert!(report.contains("eng "));
             assert!(report.contains("vol"));
+            assert!(report.contains("subvol "));
+            assert!(report.contains("suboct "));
             assert!(
                 saw_link_on ^ saw_link_off,
                 "seed {seed}: expected exactly one envlink setting"
@@ -1425,5 +1491,23 @@ mod tests {
         assert!(!report.contains("eng 2 on"));
         assert!(!report.contains("eng 2 off"));
         assert!(!report.contains("eng 2 ch "));
+    }
+
+    #[test]
+    fn show_includes_subvol_and_suboct() {
+        let mut session = Session::new();
+        let parsed = parse_line_commands("subvol 0.35", 0)
+            .unwrap()
+            .expect("subvol");
+        apply_parsed(&mut session, &parsed);
+        let parsed = parse_line_commands("suboct 2", 0)
+            .unwrap()
+            .expect("suboct");
+        apply_parsed(&mut session, &parsed);
+        let shown = format_show(&session, 0);
+        assert!(shown.contains("subvol 0.35"));
+        assert!(shown.contains("suboct 2"));
+        assert!((session.shadows[0].params.sub_vol - 0.35).abs() < f32::EPSILON);
+        assert_eq!(session.shadows[0].params.sub_octaves, SubOctaves::Two);
     }
 }

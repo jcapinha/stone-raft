@@ -97,7 +97,7 @@ Audio outputs work the same way: one device is selected automatically; several d
 
 ### Live engine params (terminal)
 
-While audio is running, change routing and subtractive params with named line commands (no MIDI device required). Unqualified commands hit the current engine. `eng 2 cutoff 800` is one-shot and does not change current. Space is required (`eng2` is an error). `show` prints a host-side copy; `random` fills subtractive params plus volume (0.2–1.0) and prints `eng N` lines including `vol`. Neither `random` nor `show` changes on/off or listen channel.
+While audio is running, change routing and subtractive params with named line commands (no MIDI device required). Unqualified commands hit the current engine. `eng 2 cutoff 800` is one-shot and does not change current. Space is required (`eng2` is an error). `show` prints a host-side copy; `random` fills subtractive params plus volume (0.2–1.0) and prints `eng N` lines including `vol`. Neither `random` nor `show` changes on/off or listen channel. The sub (`subvol` / `suboct`) is a sine mixed under the main oscillator before the filter, not a second selectable waveform.
 
 | Command | Meaning |
 |---------|---------|
@@ -115,6 +115,8 @@ While audio is running, change routing and subtractive params with named line co
 | `release <ms>` | Amp envelope release time |
 | `wave saw` / `wave square` / `wave triangle` / `wave sine` | Oscillator shape for all voices (`tri` / `sin` / `sq` aliases) |
 | `pulse <0.05..0.95>` | Pulse width for square (0.5 = classic square); ignored by other waves |
+| `subvol <0..1>` | Sub oscillator (sine) mix level; 0 is silent (default) |
+| `suboct 1` / `suboct 2` | Sub one or two octaves below the sounding note (default 1) |
 | `filtenvamt <signed>` | Filter envelope amount in octaves, e.g. `filtenvamt 3` or `filtenvamt -2` |
 | `filtenvattack <ms>` | Filter envelope attack time |
 | `filtenvdecay <ms>` | Filter envelope decay time |
