@@ -828,20 +828,6 @@ mod tests {
     }
 
     #[test]
-    fn velocity_curve_is_square_of_linear() {
-        let linear_64 = 64.0 / 127.0;
-        let curved = velocity_to_amp(64);
-        assert!(
-            (curved - linear_64 * linear_64).abs() < 1e-5,
-            "expected square curve, got {curved}"
-        );
-        assert!(velocity_to_amp(127) > velocity_to_amp(64));
-        assert!(velocity_to_amp(64) > velocity_to_amp(32));
-        // Soft velocities drop more than linear: at 64, curve < linear.
-        assert!(curved < linear_64);
-    }
-
-    #[test]
     fn oscillator_stays_within_unit_range() {
         let mut osc = Oscillator::new(SAMPLE_RATE_HZ, 440.0, Waveform::Saw);
         for _ in 0..10_000 {

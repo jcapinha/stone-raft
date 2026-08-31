@@ -167,3 +167,132 @@ pub fn velocity_to_amp(velocity: u8) -> f32 {
     let v = (velocity as f32 / 127.0).clamp(0.0, 1.0);
     v * v
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_RATE_HZ: f32 = 48_000.0;
+
+    fn fast_adsr() -> Adsr {
+        let mut env = Adsr::new(SAMPLE_RATE_HZ);
+        env.set_times_ms(1.0, 1.0, 50.0);
+        env.set_sustain(0.7);
+        env
+    }
+
+    fn step_until(env: &mut Adsr, stage: EnvelopeStage, max_samples: usize) {
+        for _ in 0..max_samples {
+            if env.stage() == stage {
+                return;
+            }
+            env.next_level();
+        }
+        panic!(
+            "expected stage {stage:?} within {max_samples} samples, got {:?}",
+            env.stage()
+        );
+    }
+
+    #[test]
+    fn adsr_starts_idle() {
+        let env = Adsr::new(SAMPLE_RATE_HZ);
+        assert_eq!(env.stage(), EnvelopeStage::Idle);
+        assert_eq!(env.level(), 0.0);
+        assert!(!env.is_active());
+    }
+
+    #[test]
+    fn note_on_enters_attack() {
+        let mut env = fast_adsr();
+        env.note_on();
+        assert_eq!(env.stage(), EnvelopeStage::Attack);
+        assert!(env.is_active());
+
+        let before = env.level();
+        env.next_level();
+        assert!(
+            env.level() > before,
+            "level should rise in attack; before={before} after={}",
+            env.level()
+        );
+    }
+
+    #[test]
+    fn attack_reaches_sustain() {
+        let mut env = fast_adsr();
+        env.note_on();
+        // 1 ms attack + 1 ms decay at 48 kHz is ~96 samples; give headroom.
+        step_until(&mut env, EnvelopeStage::Sustain, 5_000);
+        assert!((env.level() - 0.7).abs() < 1e-3);
+    }
+
+    #[test]
+    fn note_off_enters_release() {
+        let mut env = fast_adsr();
+        env.note_on();
+        step_until(&mut env, EnvelopeStage::Sustain, 5_000);
+        env.note_off();
+        assert_eq!(env.stage(), EnvelopeStage::Release);
+        assert!(env.is_releasing());
+    }
+
+    #[test]
+    fn release_returns_to_idle() {
+        let mut env = fast_adsr();
+        env.note_on();
+        step_until(&mut env, EnvelopeStage::Sustain, 5_000);
+        env.note_off();
+        // Exponential release to IDLE_LEVEL from sustain 0.7 needs ~9 time-constants
+        // (50 ms ≈ 2400 samples), so ~22k samples; give headroom.
+        step_until(&mut env, EnvelopeStage::Idle, 50_000);
+        assert_eq!(env.level(), 0.0);
+        assert!(!env.is_active());
+    }
+
+    #[test]
+    fn force_idle_clears_immediately() {
+        let mut env = fast_adsr();
+        env.note_on();
+        step_until(&mut env, EnvelopeStage::Sustain, 5_000);
+        assert!(env.level() > 0.0);
+        env.force_idle();
+        assert_eq!(env.stage(), EnvelopeStage::Idle);
+        assert_eq!(env.level(), 0.0);
+        assert!(!env.is_active());
+    }
+
+    #[test]
+    fn retrigger_preserves_level() {
+        let mut env = fast_adsr();
+        env.note_on();
+        for _ in 0..20 {
+            env.next_level();
+        }
+        let mid_attack = env.level();
+        assert!(mid_attack > 0.0);
+        assert_eq!(env.stage(), EnvelopeStage::Attack);
+
+        env.note_on();
+        assert_eq!(env.stage(), EnvelopeStage::Attack);
+        assert_eq!(
+            env.level(),
+            mid_attack,
+            "retrigger must not hard-jump level to 0"
+        );
+    }
+
+    #[test]
+    fn velocity_to_amp_curve() {
+        let linear_64 = 64.0 / 127.0;
+        let curved = velocity_to_amp(64);
+        assert!(
+            (curved - linear_64 * linear_64).abs() < 1e-5,
+            "expected square curve, got {curved}"
+        );
+        assert!(velocity_to_amp(127) > velocity_to_amp(64));
+        assert!(velocity_to_amp(64) > velocity_to_amp(32));
+        // Soft velocities drop more than linear: at 64, curve < linear.
+        assert!(curved < linear_64);
+    }
+}
