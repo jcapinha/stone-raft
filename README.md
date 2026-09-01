@@ -79,16 +79,16 @@ The four at-pitch oscillator levels are normalized as weights. Sub is additive. 
 | `on`; `off`; `ch <1..16>`; `vol <0..1>` | Enable, disable immediately, route, and set instance volume |
 | `show` | Print a replayable qualified patch with all five oscillator levels |
 | `cutoff <Hz>`; `res <0..1>` | Filter cutoff and resonance |
-| `attack <ms>`; `decay <ms>`; `sustain <0..1>`; `release <ms>` | Amp ADSR |
-| `sawvol`/`sawv`; `squarevol`/`sqvol`; `trianglevol`/`trivol`; `sinevol`/`sinvol` | At-pitch oscillator level, each `0..1` |
+| `amp a <ms>`; `amp d <ms>`; `amp s <0..1>`; `amp r <ms>` | Amp ADSR |
+| `saw <0..1>`; `sq <0..1>`; `tri <0..1>`; `sin <0..1>` | At-pitch oscillator levels |
 | `wave saw|square|triangle|sine` | Solo preset; aliases: `sq`, `tri`, `sin` |
-| `pulse <0.05..0.95>` | Square pulse width; `0.5` is a classic square |
-| `subvol <0..1>`; `suboct 1|2` | Additive sine sub level and octave; defaults are `0` and `1` |
-| `filtenvamt <signed>` | Filter envelope amount in octaves |
-| `filtenvattack <ms>`; `filtenvdecay <ms>`; `filtenvsustain <0..1>`; `filtenvrelease <ms>` | Filter ADSR |
-| `env3dest off|res|pitch|cutoff`; `env3amt <signed>` | Assignable destination and amount; octaves for pitch/cutoff, about ±1 for resonance; `resonance` aliases `res` |
-| `env3attack <ms>`; `env3decay <ms>`; `env3sustain <0..1>`; `env3release <ms>` | Assignable ADSR |
-| `envcopy`; `envlink on|off`; `envvel <0..1>` | Copy amp times, link envelope times, and scale extra envelopes by velocity |
+| `pw <0.05..0.95>` | Square pulse width; `0.5` is a classic square |
+| `sub <0..1>`; `suboct 1|2` | Additive sine sub level and octave; defaults are `0` and `1` |
+| `fenv amt <signed>` | Filter envelope amount in octaves |
+| `fenv a <ms>`; `fenv d <ms>`; `fenv s <0..1>`; `fenv r <ms>` | Filter ADSR |
+| `asenv dest off|res|pitch|cutoff`; `asenv amt <signed>` | Assignable destination and amount; octaves for pitch/cutoff, about ±1 for resonance; `resonance` aliases `res` |
+| `asenv a <ms>`; `asenv d <ms>`; `asenv s <0..1>`; `asenv r <ms>` | Assignable ADSR |
+| `env copy`; `env link on|off`; `env vel <0..1>` | Copy amp times, link envelope times, and scale extra envelopes by velocity |
 | `random` | Randomize subtractive parameters and volume `0.2..1.0`; keep enabled state and channel |
 
 `show` and `random` print qualified `eng N` lines and do not change enabled state or listen channel.
@@ -99,11 +99,11 @@ Example:
 eng 2 on
 eng 2 cutoff 1200
 res 0.4
-attack 5
-release 400
-sawvol 0.5
-squarevol 0.5
-pulse 0.2
+amp a 5
+amp r 400
+saw 0.5
+sq 0.5
+pw 0.2
 show
 random
 ```

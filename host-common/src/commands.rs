@@ -177,18 +177,13 @@ pub(crate) fn print_help() {
     println!("  random           fill params + vol (0.2-1.0); prints eng N lines");
     println!("Param commands (optional eng N prefix is one-shot):");
     println!("  cutoff <Hz>   res <0..1>");
-    println!(
-        "  sawvol|sawv <0..1>   squarevol|sqvol <0..1>   trianglevol|trivol <0..1>   sinevol|sinvol <0..1>"
-    );
-    println!("  wave saw|square|triangle|sine   pulse <0.05..0.95>");
-    println!("  subvol <0..1>   suboct 1|2");
-    println!("  attack <ms>   decay <ms>   sustain <0..1>   release <ms>");
-    println!(
-        "  filtenvamt <signed octaves>   filtenvattack/decay/release <ms>   filtenvsustain <0..1>"
-    );
-    println!("  env3dest off|res|pitch|cutoff   env3amt <signed>");
-    println!("  env3attack/decay/release <ms>   env3sustain <0..1>");
-    println!("  envcopy   envlink on|off   envvel <0..1>");
+    println!("  saw|sq|tri|sin|sub <0..1>");
+    println!("  wave saw|square|triangle|sine   pw <0.05..0.95>   suboct 1|2");
+    println!("  amp a|d|r <ms>   amp s <0..1>");
+    println!("  fenv a|d|r <ms>   fenv s <0..1>   fenv amt <signed octaves>");
+    println!("  asenv a|d|r <ms>   asenv s <0..1>");
+    println!("  asenv dest off|res|pitch|cutoff   asenv amt <signed>");
+    println!("  env copy   env link on|off   env vel <0..1>");
 }
 
 fn apply_parsed(session: &mut CommandSession, command: &ParsedCommand) {
@@ -379,7 +374,7 @@ fn random_adsr<R: Rng>(rng: &mut R) -> AdsrTimes {
     }
 }
 
-fn env3_dest_name(dest: AssignableDest) -> &'static str {
+fn assignable_dest_name(dest: AssignableDest) -> &'static str {
     match dest {
         AssignableDest::Off => "off",
         AssignableDest::Resonance => "res",
@@ -402,32 +397,32 @@ fn qualify_block(n: usize, body: &str) -> String {
 fn format_param_lines(params: &EngineParams) -> String {
     let link_name = if params.env_link { "on" } else { "off" };
     format!(
-        "sawvol {:.2}\n\
-         squarevol {:.2}\n\
-         trianglevol {:.2}\n\
-         sinevol {:.2}\n\
-         pulse {:.2}\n\
-         subvol {:.2}\n\
+        "saw {:.2}\n\
+         sq {:.2}\n\
+         tri {:.2}\n\
+         sin {:.2}\n\
+         pw {:.2}\n\
+         sub {:.2}\n\
          suboct {}\n\
          cutoff {:.0}\n\
          res {:.2}\n\
-         attack {:.0}\n\
-         decay {:.0}\n\
-         sustain {:.2}\n\
-         release {:.0}\n\
-         filtenvamt {:.2}\n\
-         filtenvattack {:.0}\n\
-         filtenvdecay {:.0}\n\
-         filtenvsustain {:.2}\n\
-         filtenvrelease {:.0}\n\
-         env3dest {}\n\
-         env3amt {:.2}\n\
-         env3attack {:.0}\n\
-         env3decay {:.0}\n\
-         env3sustain {:.2}\n\
-         env3release {:.0}\n\
-         envvel {:.2}\n\
-         envlink {link_name}\n",
+         amp a {:.0}\n\
+         amp d {:.0}\n\
+         amp s {:.2}\n\
+         amp r {:.0}\n\
+         fenv amt {:.2}\n\
+         fenv a {:.0}\n\
+         fenv d {:.0}\n\
+         fenv s {:.2}\n\
+         fenv r {:.0}\n\
+         asenv dest {}\n\
+         asenv amt {:.2}\n\
+         asenv a {:.0}\n\
+         asenv d {:.0}\n\
+         asenv s {:.2}\n\
+         asenv r {:.0}\n\
+         env vel {:.2}\n\
+         env link {link_name}\n",
         params.saw_vol,
         params.square_vol,
         params.triangle_vol,
@@ -446,7 +441,7 @@ fn format_param_lines(params: &EngineParams) -> String {
         params.filter_env.decay_ms,
         params.filter_env.sustain,
         params.filter_env.release_ms,
-        env3_dest_name(params.assignable_dest),
+        assignable_dest_name(params.assignable_dest),
         params.assignable_amount,
         params.assignable_env.attack_ms,
         params.assignable_env.decay_ms,
@@ -496,15 +491,15 @@ fn generate_random_patch<R: Rng>(rng: &mut R, instance: usize) -> ParsedCommand 
     let env_link = rng.gen_bool(0.5);
     let filter_env = if env_link { amp } else { random_adsr(rng) };
     let assign_env = if env_link { amp } else { random_adsr(rng) };
-    let filtenv_amt = rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX);
-    let env3_dest = RANDOM_ASSIGNABLE_DESTS[rng.gen_range(0..RANDOM_ASSIGNABLE_DESTS.len())];
-    let env3_amt = match env3_dest {
+    let filter_env_amount = rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX);
+    let assignable_dest = RANDOM_ASSIGNABLE_DESTS[rng.gen_range(0..RANDOM_ASSIGNABLE_DESTS.len())];
+    let assignable_amount = match assignable_dest {
         AssignableDest::Resonance => rng.gen_range(RANDOM_RES_AMT_MIN..=RANDOM_RES_AMT_MAX),
         AssignableDest::Off | AssignableDest::Pitch | AssignableDest::Cutoff => {
             rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX)
         }
     };
-    let envvel = rng.gen_range(0.0..=1.0);
+    let env_vel = rng.gen_range(0.0..=1.0);
     let sub_vol = rng.gen_range(0.0..=1.0);
     let sub_octaves = if rng.gen_bool(0.5) {
         SubOctaves::One
@@ -523,11 +518,11 @@ fn generate_random_patch<R: Rng>(rng: &mut R, instance: usize) -> ParsedCommand 
         amp_env: amp,
         filter_env,
         assignable_env: assign_env,
-        filter_env_amount: filtenv_amt,
-        assignable_amount: env3_amt,
-        assignable_dest: env3_dest,
+        filter_env_amount,
+        assignable_amount,
+        assignable_dest,
         env_link,
-        env_vel: envvel,
+        env_vel,
         sub_vol,
         sub_octaves,
     };
@@ -565,18 +560,22 @@ fn generate_random_patch<R: Rng>(rng: &mut R, instance: usize) -> ParsedCommand 
         wrap_engine(
             instance,
             ControlEvent::SetFilterEnvAmount {
-                amount: filtenv_amt,
+                amount: filter_env_amount,
             },
         ),
         wrap_engine(
             instance,
-            ControlEvent::SetAssignableDest { dest: env3_dest },
+            ControlEvent::SetAssignableDest {
+                dest: assignable_dest,
+            },
         ),
         wrap_engine(
             instance,
-            ControlEvent::SetAssignableAmount { amount: env3_amt },
+            ControlEvent::SetAssignableAmount {
+                amount: assignable_amount,
+            },
         ),
-        wrap_engine(instance, ControlEvent::SetEnvVel { amount: envvel }),
+        wrap_engine(instance, ControlEvent::SetEnvVel { amount: env_vel }),
         to_instance(instance, InstanceEvent::SetVolume { amount: volume }),
     ];
 
@@ -620,44 +619,60 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
         .next()
         .ok_or_else(|| "expected a command".to_string())?
         .to_ascii_lowercase();
-    let arg = parts.next();
-
-    if parts.next().is_some() {
-        return Err("too many arguments".to_string());
-    }
+    let args: Vec<&str> = parts.collect();
 
     match cmd.as_str() {
         "cutoff" => {
-            let hz = parse_f32_arg(arg, "cutoff")?;
+            let hz = parse_single_f32_arg(&args, "cutoff")?;
             Ok(Some(ControlEvent::SetCutoff { hz }))
         }
         "res" | "resonance" => {
-            let amount = parse_f32_arg(arg, "res")?;
+            let amount = parse_single_f32_arg(&args, "res")?;
             Ok(Some(ControlEvent::SetResonance { amount }))
         }
-        "attack" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Attack, arg, "attack"),
-        "decay" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Decay, arg, "decay"),
-        "sustain" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Sustain, arg, "sustain"),
-        "release" => envelope_patch(EnvelopeId::Amp, EnvelopeField::Release, arg, "release"),
-        "sawvol" | "sawv" => {
-            let amount = parse_f32_arg(arg, "sawvol")?;
+        "amp" => parse_grouped_envelope(&args, EnvelopeId::Amp, "amp"),
+        "attack" => envelope_patch(
+            EnvelopeId::Amp,
+            EnvelopeField::Attack,
+            single_optional_arg(&args)?,
+            "attack",
+        ),
+        "decay" => envelope_patch(
+            EnvelopeId::Amp,
+            EnvelopeField::Decay,
+            single_optional_arg(&args)?,
+            "decay",
+        ),
+        "sustain" => envelope_patch(
+            EnvelopeId::Amp,
+            EnvelopeField::Sustain,
+            single_optional_arg(&args)?,
+            "sustain",
+        ),
+        "release" => envelope_patch(
+            EnvelopeId::Amp,
+            EnvelopeField::Release,
+            single_optional_arg(&args)?,
+            "release",
+        ),
+        "saw" | "sawvol" | "sawv" => {
+            let amount = parse_single_f32_arg(&args, "saw")?;
             Ok(Some(ControlEvent::SetSawVol { amount }))
         }
-        "squarevol" | "sqvol" => {
-            let amount = parse_f32_arg(arg, "squarevol")?;
+        "sq" | "squarevol" | "sqvol" => {
+            let amount = parse_single_f32_arg(&args, "sq")?;
             Ok(Some(ControlEvent::SetSquareVol { amount }))
         }
-        "trianglevol" | "trivol" => {
-            let amount = parse_f32_arg(arg, "trianglevol")?;
+        "tri" | "trianglevol" | "trivol" => {
+            let amount = parse_single_f32_arg(&args, "tri")?;
             Ok(Some(ControlEvent::SetTriangleVol { amount }))
         }
-        "sinevol" | "sinvol" => {
-            let amount = parse_f32_arg(arg, "sinevol")?;
+        "sin" | "sinevol" | "sinvol" => {
+            let amount = parse_single_f32_arg(&args, "sin")?;
             Ok(Some(ControlEvent::SetSineVol { amount }))
         }
         "wave" => {
-            let name =
-                arg.ok_or_else(|| "wave needs saw, square, triangle, or sine".to_string())?;
+            let name = single_required_arg(&args, "wave needs saw, square, triangle, or sine")?;
             let waveform = match name.to_ascii_lowercase().as_str() {
                 "saw" => Waveform::Saw,
                 "square" | "sq" => Waveform::Square,
@@ -671,16 +686,16 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             };
             Ok(Some(ControlEvent::SetWave { waveform }))
         }
-        "pulse" => {
-            let width = parse_f32_arg(arg, "pulse")?;
+        "pw" | "pulse" => {
+            let width = parse_single_f32_arg(&args, "pw")?;
             Ok(Some(ControlEvent::SetPulse { width }))
         }
-        "subvol" => {
-            let amount = parse_f32_arg(arg, "subvol")?;
+        "sub" | "subvol" => {
+            let amount = parse_single_f32_arg(&args, "sub")?;
             Ok(Some(ControlEvent::SetSubVol { amount }))
         }
         "suboct" => {
-            let raw = arg.ok_or_else(|| "suboct needs 1 or 2".to_string())?;
+            let raw = single_required_arg(&args, "suboct needs 1 or 2")?;
             let octaves = match raw {
                 "1" => SubOctaves::One,
                 "2" => SubOctaves::Two,
@@ -690,100 +705,241 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             };
             Ok(Some(ControlEvent::SetSubOct { octaves }))
         }
+        "fenv" => parse_filter_envelope_command(&args),
         "filtenvamt" => {
-            let amount = parse_f32_arg(arg, "filtenvamt")?;
+            let amount = parse_single_f32_arg(&args, "filtenvamt")?;
             Ok(Some(ControlEvent::SetFilterEnvAmount { amount }))
         }
         "filtenvattack" => envelope_patch(
             EnvelopeId::Filter,
             EnvelopeField::Attack,
-            arg,
+            single_optional_arg(&args)?,
             "filtenvattack",
         ),
         "filtenvdecay" => envelope_patch(
             EnvelopeId::Filter,
             EnvelopeField::Decay,
-            arg,
+            single_optional_arg(&args)?,
             "filtenvdecay",
         ),
         "filtenvsustain" => envelope_patch(
             EnvelopeId::Filter,
             EnvelopeField::Sustain,
-            arg,
+            single_optional_arg(&args)?,
             "filtenvsustain",
         ),
         "filtenvrelease" => envelope_patch(
             EnvelopeId::Filter,
             EnvelopeField::Release,
-            arg,
+            single_optional_arg(&args)?,
             "filtenvrelease",
         ),
+        "asenv" => parse_assignable_envelope_command(&args),
         "env3dest" => {
-            let name =
-                arg.ok_or_else(|| "env3dest needs off, res, pitch, or cutoff".to_string())?;
-            let dest = match name.to_ascii_lowercase().as_str() {
-                "off" => AssignableDest::Off,
-                "res" | "resonance" => AssignableDest::Resonance,
-                "pitch" => AssignableDest::Pitch,
-                "cutoff" => AssignableDest::Cutoff,
-                other => {
-                    return Err(format!(
-                        "unknown dest '{other}' (use off, res, pitch, or cutoff)"
-                    ));
-                }
-            };
+            let name = single_required_arg(&args, "env3dest needs off, res, pitch, or cutoff")?;
+            let dest = parse_assignable_dest(name)?;
             Ok(Some(ControlEvent::SetAssignableDest { dest }))
         }
         "env3amt" => {
-            let amount = parse_f32_arg(arg, "env3amt")?;
+            let amount = parse_single_f32_arg(&args, "env3amt")?;
             Ok(Some(ControlEvent::SetAssignableAmount { amount }))
         }
         "env3attack" => envelope_patch(
             EnvelopeId::Assignable,
             EnvelopeField::Attack,
-            arg,
+            single_optional_arg(&args)?,
             "env3attack",
         ),
         "env3decay" => envelope_patch(
             EnvelopeId::Assignable,
             EnvelopeField::Decay,
-            arg,
+            single_optional_arg(&args)?,
             "env3decay",
         ),
         "env3sustain" => envelope_patch(
             EnvelopeId::Assignable,
             EnvelopeField::Sustain,
-            arg,
+            single_optional_arg(&args)?,
             "env3sustain",
         ),
         "env3release" => envelope_patch(
             EnvelopeId::Assignable,
             EnvelopeField::Release,
-            arg,
+            single_optional_arg(&args)?,
             "env3release",
         ),
+        "env" => parse_shared_envelope_command(&args),
         "envcopy" => {
-            if arg.is_some() {
+            expect_no_args(&args)?;
+            Ok(Some(ControlEvent::EnvCopy))
+        }
+        "envlink" => {
+            let name = single_required_arg(&args, "envlink needs on or off")?;
+            let on = parse_on_off(name, "envlink")?;
+            Ok(Some(ControlEvent::SetEnvLink { on }))
+        }
+        "envvel" => {
+            let amount = parse_single_f32_arg(&args, "envvel")?;
+            Ok(Some(ControlEvent::SetEnvVel { amount }))
+        }
+        other => Err(format!(
+            "unknown command '{other}' (eng, on, off, ch, vol, show, cutoff, res, saw, sq, tri, sin, sub, wave, pw, suboct, amp, fenv, asenv, env, random)"
+        )),
+    }
+}
+
+fn parse_grouped_envelope(
+    args: &[&str],
+    which: EnvelopeId,
+    group: &str,
+) -> Result<Option<ControlEvent>, String> {
+    if args.len() < 2 {
+        return Err(format!("{group} needs a, d, s, or r followed by a number"));
+    }
+    if args.len() > 2 {
+        return Err("too many arguments".to_string());
+    }
+    let field = match args[0].to_ascii_lowercase().as_str() {
+        "a" => EnvelopeField::Attack,
+        "d" => EnvelopeField::Decay,
+        "s" => EnvelopeField::Sustain,
+        "r" => EnvelopeField::Release,
+        other => {
+            return Err(format!(
+                "unknown {group} field '{other}' (use a, d, s, or r)"
+            ));
+        }
+    };
+    let value = args[1].parse::<f32>().map_err(|_| {
+        format!(
+            "could not parse '{}' as a number for {group} {}",
+            args[1], args[0]
+        )
+    })?;
+    Ok(Some(ControlEvent::PatchEnvelope {
+        which,
+        field,
+        value,
+    }))
+}
+
+fn parse_filter_envelope_command(args: &[&str]) -> Result<Option<ControlEvent>, String> {
+    if args
+        .first()
+        .is_some_and(|field| field.eq_ignore_ascii_case("amt"))
+    {
+        let amount = parse_grouped_f32_arg(args, "fenv amt")?;
+        return Ok(Some(ControlEvent::SetFilterEnvAmount { amount }));
+    }
+    parse_grouped_envelope(args, EnvelopeId::Filter, "fenv")
+}
+
+fn parse_assignable_envelope_command(args: &[&str]) -> Result<Option<ControlEvent>, String> {
+    match args.first().map(|part| part.to_ascii_lowercase()) {
+        Some(field) if field == "amt" => {
+            let amount = parse_grouped_f32_arg(args, "asenv amt")?;
+            Ok(Some(ControlEvent::SetAssignableAmount { amount }))
+        }
+        Some(field) if field == "dest" => {
+            if args.len() < 2 {
+                return Err("asenv dest needs off, res, pitch, or cutoff".to_string());
+            }
+            if args.len() > 2 {
+                return Err("too many arguments".to_string());
+            }
+            let dest = parse_assignable_dest(args[1])?;
+            Ok(Some(ControlEvent::SetAssignableDest { dest }))
+        }
+        _ => parse_grouped_envelope(args, EnvelopeId::Assignable, "asenv"),
+    }
+}
+
+fn parse_shared_envelope_command(args: &[&str]) -> Result<Option<ControlEvent>, String> {
+    match args.first().map(|part| part.to_ascii_lowercase()) {
+        Some(action) if action == "copy" => {
+            if args.len() > 1 {
                 return Err("too many arguments".to_string());
             }
             Ok(Some(ControlEvent::EnvCopy))
         }
-        "envlink" => {
-            let name = arg.ok_or_else(|| "envlink needs on or off".to_string())?;
-            let on = match name.to_ascii_lowercase().as_str() {
-                "on" => true,
-                "off" => false,
-                other => return Err(format!("unknown envlink '{other}' (use on or off)")),
-            };
+        Some(action) if action == "link" => {
+            if args.len() < 2 {
+                return Err("env link needs on or off".to_string());
+            }
+            if args.len() > 2 {
+                return Err("too many arguments".to_string());
+            }
+            let on = parse_on_off(args[1], "env link")?;
             Ok(Some(ControlEvent::SetEnvLink { on }))
         }
-        "envvel" => {
-            let amount = parse_f32_arg(arg, "envvel")?;
+        Some(action) if action == "vel" => {
+            let amount = parse_grouped_f32_arg(args, "env vel")?;
             Ok(Some(ControlEvent::SetEnvVel { amount }))
         }
-        other => Err(format!(
-            "unknown command '{other}' (eng, on, off, ch, vol, show, cutoff, res, attack, decay, sustain, release, sawvol, squarevol, trianglevol, sinevol, wave, pulse, subvol, suboct, filtenv*, env3*, envcopy, envlink, envvel, random)"
+        Some(other) => Err(format!(
+            "unknown env action '{other}' (use copy, link, or vel)"
         )),
+        None => Err("env needs copy, link, or vel".to_string()),
+    }
+}
+
+fn parse_assignable_dest(name: &str) -> Result<AssignableDest, String> {
+    match name.to_ascii_lowercase().as_str() {
+        "off" => Ok(AssignableDest::Off),
+        "res" | "resonance" => Ok(AssignableDest::Resonance),
+        "pitch" => Ok(AssignableDest::Pitch),
+        "cutoff" => Ok(AssignableDest::Cutoff),
+        other => Err(format!(
+            "unknown dest '{other}' (use off, res, pitch, or cutoff)"
+        )),
+    }
+}
+
+fn parse_on_off(name: &str, command: &str) -> Result<bool, String> {
+    match name.to_ascii_lowercase().as_str() {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => Err(format!("unknown {command} '{other}' (use on or off)")),
+    }
+}
+
+fn parse_grouped_f32_arg(args: &[&str], name: &str) -> Result<f32, String> {
+    if args.len() < 2 {
+        return Err(format!("{name} needs a number"));
+    }
+    if args.len() > 2 {
+        return Err("too many arguments".to_string());
+    }
+    args[1]
+        .parse::<f32>()
+        .map_err(|_| format!("could not parse '{}' as a number for {name}", args[1]))
+}
+
+fn parse_single_f32_arg(args: &[&str], name: &str) -> Result<f32, String> {
+    parse_f32_arg(single_optional_arg(args)?, name)
+}
+
+fn single_required_arg<'a>(args: &'a [&str], missing: &str) -> Result<&'a str, String> {
+    match args {
+        [] => Err(missing.to_string()),
+        [arg] => Ok(arg),
+        _ => Err("too many arguments".to_string()),
+    }
+}
+
+fn single_optional_arg<'a>(args: &'a [&str]) -> Result<Option<&'a str>, String> {
+    match args {
+        [] => Ok(None),
+        [arg] => Ok(Some(arg)),
+        _ => Err("too many arguments".to_string()),
+    }
+}
+
+fn expect_no_args(args: &[&str]) -> Result<(), String> {
+    if args.is_empty() {
+        Ok(())
+    } else {
+        Err("too many arguments".to_string())
     }
 }
 
@@ -842,6 +998,30 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+        match parse_param_command("saw 0.6").unwrap() {
+            Some(ControlEvent::SetSawVol { amount }) => {
+                assert!((amount - 0.6).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("sq 0.4").unwrap() {
+            Some(ControlEvent::SetSquareVol { amount }) => {
+                assert!((amount - 0.4).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("tri 0.3").unwrap() {
+            Some(ControlEvent::SetTriangleVol { amount }) => {
+                assert!((amount - 0.3).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("sin 0.2").unwrap() {
+            Some(ControlEvent::SetSineVol { amount }) => {
+                assert!((amount - 0.2).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
         match parse_param_command("sawv 0.3").unwrap() {
             Some(ControlEvent::SetSawVol { amount }) => {
                 assert!((amount - 0.3).abs() < f32::EPSILON)
@@ -872,9 +1052,21 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+        match parse_param_command("pw 0.35").unwrap() {
+            Some(ControlEvent::SetPulse { width }) => {
+                assert!((width - 0.35).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
         match parse_param_command("subvol 0.4").unwrap() {
             Some(ControlEvent::SetSubVol { amount }) => {
                 assert!((amount - 0.4).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("sub 0.5").unwrap() {
+            Some(ControlEvent::SetSubVol { amount }) => {
+                assert!((amount - 0.5).abs() < f32::EPSILON)
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -920,6 +1112,30 @@ mod tests {
             }) => assert!((value - 80.0).abs() < f32::EPSILON),
             other => panic!("unexpected {other:?}"),
         }
+        match parse_param_command("amp a 15").unwrap() {
+            Some(ControlEvent::PatchEnvelope {
+                which: EnvelopeId::Amp,
+                field: EnvelopeField::Attack,
+                value,
+            }) => assert!((value - 15.0).abs() < f32::EPSILON),
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("fenv s 0.4").unwrap() {
+            Some(ControlEvent::PatchEnvelope {
+                which: EnvelopeId::Filter,
+                field: EnvelopeField::Sustain,
+                value,
+            }) => assert!((value - 0.4).abs() < f32::EPSILON),
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("asenv r 120").unwrap() {
+            Some(ControlEvent::PatchEnvelope {
+                which: EnvelopeId::Assignable,
+                field: EnvelopeField::Release,
+                value,
+            }) => assert!((value - 120.0).abs() < f32::EPSILON),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
@@ -932,6 +1148,12 @@ mod tests {
         match parse_param_command("filtenvamt -2.5").unwrap() {
             Some(ControlEvent::SetFilterEnvAmount { amount }) => {
                 assert!((amount + 2.5).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("fenv amt 1.5").unwrap() {
+            Some(ControlEvent::SetFilterEnvAmount { amount }) => {
+                assert!((amount - 1.5).abs() < f32::EPSILON)
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -969,6 +1191,18 @@ mod tests {
             }) => {}
             other => panic!("unexpected {other:?}"),
         }
+        match parse_param_command("asenv dest pitch").unwrap() {
+            Some(ControlEvent::SetAssignableDest {
+                dest: AssignableDest::Pitch,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("asenv amt -1.25").unwrap() {
+            Some(ControlEvent::SetAssignableAmount { amount }) => {
+                assert!((amount + 1.25).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
@@ -993,6 +1227,20 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert!(parse_param_command("envlink maybe").is_err());
+        match parse_param_command("env copy").unwrap() {
+            Some(ControlEvent::EnvCopy) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("env link on").unwrap() {
+            Some(ControlEvent::SetEnvLink { on: true }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("env vel 0.75").unwrap() {
+            Some(ControlEvent::SetEnvVel { amount }) => {
+                assert!((amount - 0.75).abs() < f32::EPSILON)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     fn report_text(command: &ParsedCommand) -> &str {
@@ -1023,15 +1271,15 @@ mod tests {
         let report = report_text(&patch);
         assert!(report.contains("eng "));
         assert!(report.contains("vol"));
-        assert!(report.contains("sawvol "));
-        assert!(report.contains("squarevol "));
-        assert!(report.contains("trianglevol "));
-        assert!(report.contains("sinevol "));
-        assert!(report.contains("pulse "));
-        assert!(report.contains("subvol "));
+        assert!(report.contains("saw "));
+        assert!(report.contains("sq "));
+        assert!(report.contains("tri "));
+        assert!(report.contains("sin "));
+        assert!(report.contains("pw "));
+        assert!(report.contains("sub "));
         assert!(report.contains("suboct "));
         assert!(report.contains("cutoff "));
-        assert!(report.contains("envlink "));
+        assert!(report.contains("env link "));
         assert!(report.ends_with('\n'));
         assert!(!patch.events.is_empty());
     }
@@ -1170,9 +1418,9 @@ mod tests {
             let report = report_text(&patch);
             assert!(report.contains("eng "));
             assert!(report.contains("vol"));
-            assert!(report.contains("sawvol "));
-            assert!(report.contains("squarevol "));
-            assert!(report.contains("subvol "));
+            assert!(report.contains("saw "));
+            assert!(report.contains("sq "));
+            assert!(report.contains("sub "));
             assert!(report.contains("suboct "));
             assert!(
                 saw_link_on ^ saw_link_off,
@@ -1254,16 +1502,14 @@ mod tests {
     }
 
     #[test]
-    fn show_includes_subvol_and_suboct() {
+    fn show_includes_sub_and_suboct() {
         let mut session = CommandSession::new();
-        let parsed = parse_line_commands("subvol 0.35", 1)
-            .unwrap()
-            .expect("subvol");
+        let parsed = parse_line_commands("sub 0.35", 1).unwrap().expect("sub");
         apply_parsed(&mut session, &parsed);
         let parsed = parse_line_commands("suboct 2", 1).unwrap().expect("suboct");
         apply_parsed(&mut session, &parsed);
         let shown = format_show(&session, 1);
-        assert!(shown.contains("subvol 0.35"));
+        assert!(shown.contains("sub 0.35"));
         assert!(shown.contains("suboct 2"));
         assert!((session.shadows[0].params.sub_vol - 0.35).abs() < f32::EPSILON);
         assert_eq!(session.shadows[0].params.sub_octaves, SubOctaves::Two);
