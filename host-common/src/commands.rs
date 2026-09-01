@@ -1,8 +1,8 @@
 //! Terminal command parsing and host-side engine state.
 
 use engine::{
-    AdsrTimes, ControlEvent, ENGINE_COUNT, EngineParams, Env3Dest, EnvelopeField, EnvelopeId,
-    MixerEvent, SlotEvent, SubOctaves, Waveform,
+    AdsrTimes, AssignableDest, ControlEvent, ENGINE_COUNT, EngineParams, EnvelopeField, EnvelopeId,
+    InstanceEvent, MixerEvent, SubOctaves, Waveform,
 };
 use rand::Rng;
 
@@ -22,14 +22,14 @@ const RANDOM_VOL_MAX: f32 = 1.0;
 
 const RANDOM_PULSE_MIN: f32 = 0.05;
 const RANDOM_PULSE_MAX: f32 = 0.95;
-const RANDOM_ENV3_DESTS: [Env3Dest; 4] = [
-    Env3Dest::Off,
-    Env3Dest::Resonance,
-    Env3Dest::Pitch,
-    Env3Dest::Cutoff,
+const RANDOM_ASSIGNABLE_DESTS: [AssignableDest; 4] = [
+    AssignableDest::Off,
+    AssignableDest::Resonance,
+    AssignableDest::Pitch,
+    AssignableDest::Cutoff,
 ];
 
-struct SlotShadow {
+struct InstanceShadow {
     params: EngineParams,
     enabled: bool,
     listen_channel: u8,
@@ -37,34 +37,34 @@ struct SlotShadow {
 }
 
 pub(crate) struct CommandSession {
-    current_slot: usize,
-    shadows: [SlotShadow; ENGINE_COUNT],
+    current_instance: usize,
+    shadows: [InstanceShadow; ENGINE_COUNT],
 }
 
 impl CommandSession {
     pub(crate) fn new() -> Self {
         Self {
-            current_slot: 0,
+            current_instance: 1,
             shadows: [
-                SlotShadow {
+                InstanceShadow {
                     params: EngineParams::default(),
                     enabled: true,
                     listen_channel: 1,
                     volume: 1.0,
                 },
-                SlotShadow {
+                InstanceShadow {
                     params: EngineParams::default(),
                     enabled: false,
                     listen_channel: 2,
                     volume: 1.0,
                 },
-                SlotShadow {
+                InstanceShadow {
                     params: EngineParams::default(),
                     enabled: false,
                     listen_channel: 3,
                     volume: 1.0,
                 },
-                SlotShadow {
+                InstanceShadow {
                     params: EngineParams::default(),
                     enabled: false,
                     listen_channel: 4,
@@ -76,21 +76,21 @@ impl CommandSession {
 
     fn apply_event(&mut self, event: MixerEvent) {
         match event {
-            MixerEvent::ToSlot { slot, event } => {
-                let index = slot as usize;
+            MixerEvent::ToInstance { instance, event } => {
+                let index = (instance as usize).wrapping_sub(1);
                 if index >= ENGINE_COUNT {
                     return;
                 }
                 let shadow = &mut self.shadows[index];
                 match event {
-                    SlotEvent::Engine(control) => {
+                    InstanceEvent::Engine(control) => {
                         let _ = shadow.params.apply(control);
                     }
-                    SlotEvent::SetEnabled { on } => shadow.enabled = on,
-                    SlotEvent::SetListenChannel { channel } => {
+                    InstanceEvent::SetEnabled { on } => shadow.enabled = on,
+                    InstanceEvent::SetListenChannel { channel } => {
                         shadow.listen_channel = channel.clamp(1, 16);
                     }
-                    SlotEvent::SetVolume { amount } => {
+                    InstanceEvent::SetVolume { amount } => {
                         shadow.volume = amount.clamp(0.0, 1.0);
                     }
                 }
@@ -100,7 +100,7 @@ impl CommandSession {
     }
 
     pub(crate) fn current_enabled(&self) -> bool {
-        self.shadows[self.current_slot].enabled
+        self.shadows[self.current_instance - 1].enabled
     }
 }
 
@@ -108,7 +108,7 @@ impl CommandSession {
 enum PrintAfter {
     None,
     Status,
-    Show { slot: usize },
+    Show { instance: usize },
     Report(String),
 }
 
@@ -130,13 +130,13 @@ pub(crate) enum CommandOutcome {
 
 impl CommandSession {
     pub(crate) fn handle(&mut self, line: &str) -> CommandOutcome {
-        match parse_line_commands(line, self.current_slot) {
+        match parse_line_commands(line, self.current_instance) {
             Ok(Some(command)) => {
                 apply_parsed(self, &command);
                 let text = match command.print {
                     PrintAfter::None => String::new(),
                     PrintAfter::Status => format_eng_status(self),
-                    PrintAfter::Show { slot } => format_show(self, slot),
+                    PrintAfter::Show { instance } => format_show(self, instance),
                     PrintAfter::Report(report) => report,
                 };
                 CommandOutcome::Applied {
@@ -150,7 +150,7 @@ impl CommandSession {
     }
 
     pub(crate) fn current_engine_number(&self) -> usize {
-        self.current_slot + 1
+        self.current_instance
     }
 
     pub(crate) fn keyboard_note_event(&self, note: u8, on: bool) -> MixerEvent {
@@ -162,7 +162,7 @@ impl CommandSession {
         } else {
             ControlEvent::NoteOff { note }
         };
-        to_slot(self.current_slot, SlotEvent::Engine(control))
+        to_instance(self.current_instance, InstanceEvent::Engine(control))
     }
 }
 
@@ -192,8 +192,8 @@ pub(crate) fn print_help() {
 }
 
 fn apply_parsed(session: &mut CommandSession, command: &ParsedCommand) {
-    if let Some(slot) = command.switch_current {
-        session.current_slot = slot;
+    if let Some(instance) = command.switch_current {
+        session.current_instance = instance;
     }
     for event in &command.events {
         session.apply_event(*event);
@@ -214,7 +214,7 @@ fn parse_engine_number(raw: &str) -> Result<usize, String> {
     if !(1..=ENGINE_COUNT).contains(&n) {
         return Err(format!("eng needs a number 1 through {ENGINE_COUNT}"));
     }
-    Ok(n - 1)
+    Ok(n)
 }
 
 fn parse_listen_channel(raw: &str) -> Result<u8, String> {
@@ -227,14 +227,17 @@ fn parse_listen_channel(raw: &str) -> Result<u8, String> {
     Ok(n)
 }
 
-fn to_slot(slot: usize, event: SlotEvent) -> MixerEvent {
-    MixerEvent::ToSlot {
-        slot: slot as u8,
+fn to_instance(instance: usize, event: InstanceEvent) -> MixerEvent {
+    MixerEvent::ToInstance {
+        instance: instance as u8,
         event,
     }
 }
 
-fn parse_line_commands(line: &str, current_slot: usize) -> Result<Option<ParsedCommand>, String> {
+fn parse_line_commands(
+    line: &str,
+    current_instance: usize,
+) -> Result<Option<ParsedCommand>, String> {
     if line.is_empty() {
         return Ok(None);
     }
@@ -253,22 +256,22 @@ fn parse_line_commands(line: &str, current_slot: usize) -> Result<Option<ParsedC
                 print: PrintAfter::Status,
             }));
         }
-        let slot = parse_engine_number(tokens[1])?;
+        let instance = parse_engine_number(tokens[1])?;
         if tokens.len() == 2 {
             return Ok(Some(ParsedCommand {
-                switch_current: Some(slot),
+                switch_current: Some(instance),
                 events: Vec::new(),
                 print: PrintAfter::Status,
             }));
         }
         let rest = tokens[2..].join(" ");
-        return parse_targeted_command(&rest, slot).map(Some);
+        return parse_targeted_command(&rest, instance).map(Some);
     }
 
-    parse_targeted_command(line, current_slot).map(Some)
+    parse_targeted_command(line, current_instance).map(Some)
 }
 
-fn parse_targeted_command(line: &str, slot: usize) -> Result<ParsedCommand, String> {
+fn parse_targeted_command(line: &str, instance: usize) -> Result<ParsedCommand, String> {
     let mut parts = line.split_whitespace();
     let cmd = parts
         .next()
@@ -285,7 +288,10 @@ fn parse_targeted_command(line: &str, slot: usize) -> Result<ParsedCommand, Stri
             }
             Ok(ParsedCommand {
                 switch_current: None,
-                events: vec![to_slot(slot, SlotEvent::SetEnabled { on: true })],
+                events: vec![to_instance(
+                    instance,
+                    InstanceEvent::SetEnabled { on: true },
+                )],
                 print: PrintAfter::None,
             })
         }
@@ -295,7 +301,10 @@ fn parse_targeted_command(line: &str, slot: usize) -> Result<ParsedCommand, Stri
             }
             Ok(ParsedCommand {
                 switch_current: None,
-                events: vec![to_slot(slot, SlotEvent::SetEnabled { on: false })],
+                events: vec![to_instance(
+                    instance,
+                    InstanceEvent::SetEnabled { on: false },
+                )],
                 print: PrintAfter::None,
             })
         }
@@ -309,7 +318,10 @@ fn parse_targeted_command(line: &str, slot: usize) -> Result<ParsedCommand, Stri
             let channel = parse_listen_channel(raw)?;
             Ok(ParsedCommand {
                 switch_current: None,
-                events: vec![to_slot(slot, SlotEvent::SetListenChannel { channel })],
+                events: vec![to_instance(
+                    instance,
+                    InstanceEvent::SetListenChannel { channel },
+                )],
                 print: PrintAfter::None,
             })
         }
@@ -320,7 +332,7 @@ fn parse_targeted_command(line: &str, slot: usize) -> Result<ParsedCommand, Stri
             }
             Ok(ParsedCommand {
                 switch_current: None,
-                events: vec![to_slot(slot, SlotEvent::SetVolume { amount })],
+                events: vec![to_instance(instance, InstanceEvent::SetVolume { amount })],
                 print: PrintAfter::None,
             })
         }
@@ -331,21 +343,21 @@ fn parse_targeted_command(line: &str, slot: usize) -> Result<ParsedCommand, Stri
             Ok(ParsedCommand {
                 switch_current: None,
                 events: Vec::new(),
-                print: PrintAfter::Show { slot },
+                print: PrintAfter::Show { instance: instance },
             })
         }
         "random" => {
             if parts.next().is_some() {
                 return Err("too many arguments".to_string());
             }
-            Ok(generate_random_patch(&mut rand::thread_rng(), slot))
+            Ok(generate_random_patch(&mut rand::thread_rng(), instance))
         }
         _ => {
             let event =
                 parse_param_command(line)?.ok_or_else(|| "expected a command".to_string())?;
             Ok(ParsedCommand {
                 switch_current: None,
-                events: vec![to_slot(slot, SlotEvent::Engine(event))],
+                events: vec![to_instance(instance, InstanceEvent::Engine(event))],
                 print: PrintAfter::None,
             })
         }
@@ -367,12 +379,12 @@ fn random_adsr<R: Rng>(rng: &mut R) -> AdsrTimes {
     }
 }
 
-fn env3_dest_name(dest: Env3Dest) -> &'static str {
+fn env3_dest_name(dest: AssignableDest) -> &'static str {
     match dest {
-        Env3Dest::Off => "off",
-        Env3Dest::Resonance => "res",
-        Env3Dest::Pitch => "pitch",
-        Env3Dest::Cutoff => "cutoff",
+        AssignableDest::Off => "off",
+        AssignableDest::Resonance => "res",
+        AssignableDest::Pitch => "pitch",
+        AssignableDest::Cutoff => "cutoff",
     }
 }
 
@@ -425,28 +437,28 @@ fn format_param_lines(params: &EngineParams) -> String {
         params.sub_octaves.as_u8(),
         params.cutoff_hz,
         params.resonance,
-        params.amp.attack_ms,
-        params.amp.decay_ms,
-        params.amp.sustain,
-        params.amp.release_ms,
-        params.filtenv_amt,
+        params.amp_env.attack_ms,
+        params.amp_env.decay_ms,
+        params.amp_env.sustain,
+        params.amp_env.release_ms,
+        params.filter_env_amount,
         params.filter_env.attack_ms,
         params.filter_env.decay_ms,
         params.filter_env.sustain,
         params.filter_env.release_ms,
-        env3_dest_name(params.env3_dest),
-        params.env3_amt,
-        params.assign_env.attack_ms,
-        params.assign_env.decay_ms,
-        params.assign_env.sustain,
-        params.assign_env.release_ms,
-        params.envvel,
+        env3_dest_name(params.assignable_dest),
+        params.assignable_amount,
+        params.assignable_env.attack_ms,
+        params.assignable_env.decay_ms,
+        params.assignable_env.sustain,
+        params.assignable_env.release_ms,
+        params.env_vel,
     )
 }
 
 fn format_eng_status(session: &CommandSession) -> String {
-    let n = session.current_slot + 1;
-    let shadow = &session.shadows[session.current_slot];
+    let n = session.current_instance;
+    let shadow = &session.shadows[n - 1];
     let state = if shadow.enabled { "on" } else { "off" };
     format!(
         "{}{}{}",
@@ -456,9 +468,9 @@ fn format_eng_status(session: &CommandSession) -> String {
     )
 }
 
-fn format_show(session: &CommandSession, slot: usize) -> String {
-    let n = slot + 1;
-    let shadow = &session.shadows[slot];
+fn format_show(session: &CommandSession, instance: usize) -> String {
+    let n = instance;
+    let shadow = &session.shadows[instance - 1];
     let state = if shadow.enabled { "on" } else { "off" };
     let mut out = String::new();
     out.push_str(&qualified(n, state));
@@ -468,11 +480,11 @@ fn format_show(session: &CommandSession, slot: usize) -> String {
     out
 }
 
-fn wrap_engine(slot: usize, event: ControlEvent) -> MixerEvent {
-    to_slot(slot, SlotEvent::Engine(event))
+fn wrap_engine(instance: usize, event: ControlEvent) -> MixerEvent {
+    to_instance(instance, InstanceEvent::Engine(event))
 }
 
-fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
+fn generate_random_patch<R: Rng>(rng: &mut R, instance: usize) -> ParsedCommand {
     let saw_vol = rng.gen_range(0.0..=1.0);
     let square_vol = rng.gen_range(0.0..=1.0);
     let triangle_vol = rng.gen_range(0.0..=1.0);
@@ -485,10 +497,10 @@ fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
     let filter_env = if env_link { amp } else { random_adsr(rng) };
     let assign_env = if env_link { amp } else { random_adsr(rng) };
     let filtenv_amt = rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX);
-    let env3_dest = RANDOM_ENV3_DESTS[rng.gen_range(0..RANDOM_ENV3_DESTS.len())];
+    let env3_dest = RANDOM_ASSIGNABLE_DESTS[rng.gen_range(0..RANDOM_ASSIGNABLE_DESTS.len())];
     let env3_amt = match env3_dest {
-        Env3Dest::Resonance => rng.gen_range(RANDOM_RES_AMT_MIN..=RANDOM_RES_AMT_MAX),
-        Env3Dest::Off | Env3Dest::Pitch | Env3Dest::Cutoff => {
+        AssignableDest::Resonance => rng.gen_range(RANDOM_RES_AMT_MIN..=RANDOM_RES_AMT_MAX),
+        AssignableDest::Off | AssignableDest::Pitch | AssignableDest::Cutoff => {
             rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX)
         }
     };
@@ -508,73 +520,82 @@ fn generate_random_patch<R: Rng>(rng: &mut R, slot: usize) -> ParsedCommand {
         pulse_width,
         cutoff_hz,
         resonance,
-        amp,
+        amp_env: amp,
         filter_env,
-        assign_env,
-        filtenv_amt,
-        env3_amt,
-        env3_dest,
+        assignable_env: assign_env,
+        filter_env_amount: filtenv_amt,
+        assignable_amount: env3_amt,
+        assignable_dest: env3_dest,
         env_link,
-        envvel,
+        env_vel: envvel,
         sub_vol,
         sub_octaves,
     };
-    let n = slot + 1;
+    let n = instance;
     let mut report = qualified(n, &format!("vol {volume:.2}"));
     report.push_str(&qualify_block(n, &format_param_lines(&params)));
 
     let mut events = vec![
-        wrap_engine(slot, ControlEvent::SetSawVol { amount: saw_vol }),
-        wrap_engine(slot, ControlEvent::SetSquareVol { amount: square_vol }),
+        wrap_engine(instance, ControlEvent::SetSawVol { amount: saw_vol }),
+        wrap_engine(instance, ControlEvent::SetSquareVol { amount: square_vol }),
         wrap_engine(
-            slot,
+            instance,
             ControlEvent::SetTriangleVol {
                 amount: triangle_vol,
             },
         ),
-        wrap_engine(slot, ControlEvent::SetSineVol { amount: sine_vol }),
-        wrap_engine(slot, ControlEvent::SetPulse { width: pulse_width }),
-        wrap_engine(slot, ControlEvent::SetSubVol { amount: sub_vol }),
+        wrap_engine(instance, ControlEvent::SetSineVol { amount: sine_vol }),
+        wrap_engine(instance, ControlEvent::SetPulse { width: pulse_width }),
+        wrap_engine(instance, ControlEvent::SetSubVol { amount: sub_vol }),
         wrap_engine(
-            slot,
+            instance,
             ControlEvent::SetSubOct {
                 octaves: sub_octaves,
             },
         ),
-        wrap_engine(slot, ControlEvent::SetCutoff { hz: cutoff_hz }),
-        wrap_engine(slot, ControlEvent::SetResonance { amount: resonance }),
+        wrap_engine(instance, ControlEvent::SetCutoff { hz: cutoff_hz }),
+        wrap_engine(instance, ControlEvent::SetResonance { amount: resonance }),
         wrap_engine(
-            slot,
+            instance,
             ControlEvent::SetEnvelope {
                 which: EnvelopeId::Amp,
                 times: amp,
             },
         ),
         wrap_engine(
-            slot,
-            ControlEvent::SetFiltEnvAmt {
+            instance,
+            ControlEvent::SetFilterEnvAmount {
                 amount: filtenv_amt,
             },
         ),
-        wrap_engine(slot, ControlEvent::SetEnv3Dest { dest: env3_dest }),
-        wrap_engine(slot, ControlEvent::SetEnv3Amt { amount: env3_amt }),
-        wrap_engine(slot, ControlEvent::SetEnvVel { amount: envvel }),
-        to_slot(slot, SlotEvent::SetVolume { amount: volume }),
+        wrap_engine(
+            instance,
+            ControlEvent::SetAssignableDest { dest: env3_dest },
+        ),
+        wrap_engine(
+            instance,
+            ControlEvent::SetAssignableAmount { amount: env3_amt },
+        ),
+        wrap_engine(instance, ControlEvent::SetEnvVel { amount: envvel }),
+        to_instance(instance, InstanceEvent::SetVolume { amount: volume }),
     ];
 
     if env_link {
-        events.push(wrap_engine(slot, ControlEvent::SetEnvLink { on: true }));
+        events.push(wrap_engine(instance, ControlEvent::SetEnvLink { on: true }));
     } else {
-        events.push(wrap_engine(slot, ControlEvent::SetEnvLink { on: false }));
         events.push(wrap_engine(
-            slot,
+            instance,
+            ControlEvent::SetEnvLink { on: false },
+        ));
+        events.push(wrap_engine(
+            instance,
             ControlEvent::SetEnvelope {
                 which: EnvelopeId::Filter,
                 times: filter_env,
             },
         ));
         events.push(wrap_engine(
-            slot,
+            instance,
             ControlEvent::SetEnvelope {
                 which: EnvelopeId::Assignable,
                 times: assign_env,
@@ -671,7 +692,7 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
         }
         "filtenvamt" => {
             let amount = parse_f32_arg(arg, "filtenvamt")?;
-            Ok(Some(ControlEvent::SetFiltEnvAmt { amount }))
+            Ok(Some(ControlEvent::SetFilterEnvAmount { amount }))
         }
         "filtenvattack" => envelope_patch(
             EnvelopeId::Filter,
@@ -701,21 +722,21 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             let name =
                 arg.ok_or_else(|| "env3dest needs off, res, pitch, or cutoff".to_string())?;
             let dest = match name.to_ascii_lowercase().as_str() {
-                "off" => Env3Dest::Off,
-                "res" | "resonance" => Env3Dest::Resonance,
-                "pitch" => Env3Dest::Pitch,
-                "cutoff" => Env3Dest::Cutoff,
+                "off" => AssignableDest::Off,
+                "res" | "resonance" => AssignableDest::Resonance,
+                "pitch" => AssignableDest::Pitch,
+                "cutoff" => AssignableDest::Cutoff,
                 other => {
                     return Err(format!(
                         "unknown dest '{other}' (use off, res, pitch, or cutoff)"
                     ));
                 }
             };
-            Ok(Some(ControlEvent::SetEnv3Dest { dest }))
+            Ok(Some(ControlEvent::SetAssignableDest { dest }))
         }
         "env3amt" => {
             let amount = parse_f32_arg(arg, "env3amt")?;
-            Ok(Some(ControlEvent::SetEnv3Amt { amount }))
+            Ok(Some(ControlEvent::SetAssignableAmount { amount }))
         }
         "env3attack" => envelope_patch(
             EnvelopeId::Assignable,
@@ -909,7 +930,7 @@ mod tests {
     #[test]
     fn parses_filtenvamt_signed() {
         match parse_param_command("filtenvamt -2.5").unwrap() {
-            Some(ControlEvent::SetFiltEnvAmt { amount }) => {
+            Some(ControlEvent::SetFilterEnvAmount { amount }) => {
                 assert!((amount + 2.5).abs() < f32::EPSILON)
             }
             other => panic!("unexpected {other:?}"),
@@ -919,32 +940,32 @@ mod tests {
     #[test]
     fn parses_env3dest_tokens_and_alias() {
         match parse_param_command("env3dest off").unwrap() {
-            Some(ControlEvent::SetEnv3Dest {
-                dest: Env3Dest::Off,
+            Some(ControlEvent::SetAssignableDest {
+                dest: AssignableDest::Off,
             }) => {}
             other => panic!("unexpected {other:?}"),
         }
         match parse_param_command("env3dest res").unwrap() {
-            Some(ControlEvent::SetEnv3Dest {
-                dest: Env3Dest::Resonance,
+            Some(ControlEvent::SetAssignableDest {
+                dest: AssignableDest::Resonance,
             }) => {}
             other => panic!("unexpected {other:?}"),
         }
         match parse_param_command("env3dest resonance").unwrap() {
-            Some(ControlEvent::SetEnv3Dest {
-                dest: Env3Dest::Resonance,
+            Some(ControlEvent::SetAssignableDest {
+                dest: AssignableDest::Resonance,
             }) => {}
             other => panic!("unexpected {other:?}"),
         }
         match parse_param_command("env3dest pitch").unwrap() {
-            Some(ControlEvent::SetEnv3Dest {
-                dest: Env3Dest::Pitch,
+            Some(ControlEvent::SetAssignableDest {
+                dest: AssignableDest::Pitch,
             }) => {}
             other => panic!("unexpected {other:?}"),
         }
         match parse_param_command("env3dest cutoff").unwrap() {
-            Some(ControlEvent::SetEnv3Dest {
-                dest: Env3Dest::Cutoff,
+            Some(ControlEvent::SetAssignableDest {
+                dest: AssignableDest::Cutoff,
             }) => {}
             other => panic!("unexpected {other:?}"),
         }
@@ -983,12 +1004,12 @@ mod tests {
 
     #[test]
     fn rejects_random_with_extra_args() {
-        assert!(parse_line_commands("random extra", 0).is_err());
+        assert!(parse_line_commands("random extra", 1).is_err());
     }
 
     #[test]
     fn parses_random_command() {
-        let parsed = parse_line_commands("random", 0)
+        let parsed = parse_line_commands("random", 1)
             .unwrap()
             .expect("random should produce events");
         assert!(parsed.events.len() > 1);
@@ -998,7 +1019,7 @@ mod tests {
     #[test]
     fn random_command_prints_a_replayable_patch() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(1);
-        let patch = generate_random_patch(&mut rng, 0);
+        let patch = generate_random_patch(&mut rng, 1);
         let report = report_text(&patch);
         assert!(report.contains("eng "));
         assert!(report.contains("vol"));
@@ -1019,32 +1040,33 @@ mod tests {
     fn random_patches_stay_in_range_and_respect_envlink() {
         for seed in 0..32 {
             let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-            let patch = generate_random_patch(&mut rng, 1);
+            let patch = generate_random_patch(&mut rng, 2);
             let mut saw_link_on = false;
             let mut saw_link_off = false;
             let mut extra_env_times = 0usize;
-            let mut env3_dest = Env3Dest::Off;
+            let mut env3_dest = AssignableDest::Off;
             let mut saw_volume = false;
 
             let mut saw_osc_levels = 0usize;
             for event in &patch.events {
                 match event {
-                    MixerEvent::ToSlot { slot, event } => {
-                        assert_eq!(*slot, 1);
+                    MixerEvent::ToInstance { instance, event } => {
+                        assert_eq!(*instance, 2);
                         match event {
-                            SlotEvent::SetEnabled { .. } | SlotEvent::SetListenChannel { .. } => {
+                            InstanceEvent::SetEnabled { .. }
+                            | InstanceEvent::SetListenChannel { .. } => {
                                 panic!(
                                     "seed {seed}: random must not change enabled or listen channel"
                                 );
                             }
-                            SlotEvent::SetVolume { amount } => {
+                            InstanceEvent::SetVolume { amount } => {
                                 assert!(
                                     *amount >= RANDOM_VOL_MIN && *amount <= RANDOM_VOL_MAX,
                                     "seed {seed}: volume {amount} out of range"
                                 );
                                 saw_volume = true;
                             }
-                            SlotEvent::Engine(control) => match control {
+                            InstanceEvent::Engine(control) => match control {
                                 ControlEvent::SetCutoff { hz } => {
                                     assert!(
                                         *hz >= RANDOM_CUTOFF_MIN_HZ && *hz <= RANDOM_CUTOFF_MAX_HZ
@@ -1077,18 +1099,20 @@ mod tests {
                                 ControlEvent::SetEnvVel { amount } => {
                                     assert!(*amount >= 0.0 && *amount <= 1.0);
                                 }
-                                ControlEvent::SetFiltEnvAmt { amount } => {
+                                ControlEvent::SetFilterEnvAmount { amount } => {
                                     assert!(*amount >= RANDOM_AMT_MIN && *amount <= RANDOM_AMT_MAX);
                                 }
-                                ControlEvent::SetEnv3Dest { dest } => env3_dest = *dest,
-                                ControlEvent::SetEnv3Amt { amount } => match env3_dest {
-                                    Env3Dest::Resonance => {
+                                ControlEvent::SetAssignableDest { dest } => env3_dest = *dest,
+                                ControlEvent::SetAssignableAmount { amount } => match env3_dest {
+                                    AssignableDest::Resonance => {
                                         assert!(
                                             *amount >= RANDOM_RES_AMT_MIN
                                                 && *amount <= RANDOM_RES_AMT_MAX
                                         );
                                     }
-                                    Env3Dest::Off | Env3Dest::Pitch | Env3Dest::Cutoff => {
+                                    AssignableDest::Off
+                                    | AssignableDest::Pitch
+                                    | AssignableDest::Cutoff => {
                                         assert!(
                                             *amount >= RANDOM_AMT_MIN && *amount <= RANDOM_AMT_MAX
                                         );
@@ -1171,52 +1195,52 @@ mod tests {
     #[test]
     fn eng_2_cutoff_is_oneshot() {
         let mut session = CommandSession::new();
-        assert_eq!(session.current_slot, 0);
-        let parsed = parse_line_commands("eng 2 cutoff 800", session.current_slot)
+        assert_eq!(session.current_instance, 1);
+        let parsed = parse_line_commands("eng 2 cutoff 800", session.current_instance)
             .unwrap()
             .expect("command");
         assert!(parsed.switch_current.is_none());
         match parsed.events.as_slice() {
             [
-                MixerEvent::ToSlot {
-                    slot: 1,
-                    event: SlotEvent::Engine(ControlEvent::SetCutoff { hz }),
+                MixerEvent::ToInstance {
+                    instance: 2,
+                    event: InstanceEvent::Engine(ControlEvent::SetCutoff { hz }),
                 },
             ] => assert!((*hz - 800.0).abs() < f32::EPSILON),
             other => panic!("unexpected {other:?}"),
         }
         apply_parsed(&mut session, &parsed);
-        assert_eq!(session.current_slot, 0);
+        assert_eq!(session.current_instance, 1);
         assert!((session.shadows[1].params.cutoff_hz - 800.0).abs() < f32::EPSILON);
     }
 
     #[test]
     fn glued_eng2_errors() {
-        assert!(parse_line_commands("eng2", 0).is_err());
-        assert!(parse_line_commands("eng2 cutoff 800", 0).is_err());
+        assert!(parse_line_commands("eng2", 1).is_err());
+        assert!(parse_line_commands("eng2 cutoff 800", 1).is_err());
     }
 
     #[test]
     fn eng_out_of_range_errors() {
-        assert!(parse_line_commands("eng 0", 0).is_err());
-        assert!(parse_line_commands("eng 5", 0).is_err());
+        assert!(parse_line_commands("eng 0", 1).is_err());
+        assert!(parse_line_commands("eng 5", 1).is_err());
     }
 
     #[test]
     fn ch_out_of_range_errors() {
-        assert!(parse_line_commands("ch 0", 0).is_err());
-        assert!(parse_line_commands("ch 17", 0).is_err());
+        assert!(parse_line_commands("ch 0", 1).is_err());
+        assert!(parse_line_commands("ch 17", 1).is_err());
     }
 
     #[test]
     fn eng_2_random_does_not_switch_current_or_routing() {
         let mut session = CommandSession::new();
-        let parsed = parse_line_commands("eng 2 random", 0)
+        let parsed = parse_line_commands("eng 2 random", 1)
             .unwrap()
             .expect("random");
         assert!(parsed.switch_current.is_none());
         apply_parsed(&mut session, &parsed);
-        assert_eq!(session.current_slot, 0);
+        assert_eq!(session.current_instance, 1);
         assert!(!session.shadows[1].enabled);
         assert_eq!(session.shadows[1].listen_channel, 2);
         assert!(session.shadows[1].volume >= RANDOM_VOL_MIN);
@@ -1232,13 +1256,13 @@ mod tests {
     #[test]
     fn show_includes_subvol_and_suboct() {
         let mut session = CommandSession::new();
-        let parsed = parse_line_commands("subvol 0.35", 0)
+        let parsed = parse_line_commands("subvol 0.35", 1)
             .unwrap()
             .expect("subvol");
         apply_parsed(&mut session, &parsed);
-        let parsed = parse_line_commands("suboct 2", 0).unwrap().expect("suboct");
+        let parsed = parse_line_commands("suboct 2", 1).unwrap().expect("suboct");
         apply_parsed(&mut session, &parsed);
-        let shown = format_show(&session, 0);
+        let shown = format_show(&session, 1);
         assert!(shown.contains("subvol 0.35"));
         assert!(shown.contains("suboct 2"));
         assert!((session.shadows[0].params.sub_vol - 0.35).abs() < f32::EPSILON);

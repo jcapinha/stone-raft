@@ -3,7 +3,7 @@
 use crate::envelope::velocity_to_amp;
 use crate::filter::Svf;
 use crate::oscillator::{Oscillator, Waveform};
-use crate::{EngineParams, Env3Dest, VOICE_COUNT, hz_times_octaves, midi_note_to_hz};
+use crate::{AssignableDest, EngineParams, VOICE_COUNT, hz_times_octaves, midi_note_to_hz};
 
 /// Conservative per-voice gain so a few bright voices stay near full scale.
 const VOICE_AMPLITUDE: f32 = 0.12;
@@ -25,7 +25,7 @@ struct Voice {
     filter: Svf,
     amp: crate::Adsr,
     filter_env: crate::Adsr,
-    assign_env: crate::Adsr,
+    assignable_env: crate::Adsr,
     note: u8,
     velocity_amp: f32,
     base_hz: f32,
@@ -44,7 +44,7 @@ impl Voice {
             filter: Svf::new(),
             amp: crate::Adsr::new(sample_rate_hz),
             filter_env: crate::Adsr::new(sample_rate_hz),
-            assign_env: crate::Adsr::new(sample_rate_hz),
+            assignable_env: crate::Adsr::new(sample_rate_hz),
             note: 0,
             velocity_amp: 1.0,
             base_hz: 440.0,
@@ -61,9 +61,9 @@ impl Voice {
     }
 
     fn synchronize_envelopes(&mut self, params: &EngineParams) {
-        params.amp.apply_to(&mut self.amp);
+        params.amp_env.apply_to(&mut self.amp);
         params.filter_env.apply_to(&mut self.filter_env);
-        params.assign_env.apply_to(&mut self.assign_env);
+        params.assignable_env.apply_to(&mut self.assignable_env);
     }
 
     fn start(
@@ -87,7 +87,7 @@ impl Voice {
         self.synchronize_envelopes(params);
         self.amp.note_on();
         self.filter_env.note_on();
-        self.assign_env.note_on();
+        self.assignable_env.note_on();
         self.note = note;
         self.velocity_amp = velocity_to_amp(velocity);
         self.base_hz = base_hz;
@@ -97,13 +97,13 @@ impl Voice {
     fn release(&mut self) {
         self.amp.note_off();
         self.filter_env.note_off();
-        self.assign_env.note_off();
+        self.assignable_env.note_off();
     }
 
     fn silence(&mut self) {
         self.amp.force_idle();
         self.filter_env.force_idle();
-        self.assign_env.force_idle();
+        self.assignable_env.force_idle();
     }
 
     fn render_sample(&mut self, sample_rate_hz: f32, params: &EngineParams) -> f32 {
@@ -112,25 +112,28 @@ impl Voice {
         }
 
         let filter_level = self.filter_env.next_level();
-        let assign_level = self.assign_env.next_level();
+        let assign_level = self.assignable_env.next_level();
         let velocity = self.velocity_amp;
-        let filter_octaves =
-            filter_level * effective_envelope_amount(params.filtenv_amt, params.envvel, velocity);
-        let assign_amount = effective_envelope_amount(params.env3_amt, params.envvel, velocity);
+        let filter_octaves = filter_level
+            * effective_envelope_amount(params.filter_env_amount, params.env_vel, velocity);
+        let assign_amount =
+            effective_envelope_amount(params.assignable_amount, params.env_vel, velocity);
 
-        let (assign_cutoff_octaves, resonance, oscillator_hz) = match params.env3_dest {
-            Env3Dest::Off => (0.0, params.resonance, self.base_hz),
-            Env3Dest::Resonance => (
+        let (assign_cutoff_octaves, resonance, oscillator_hz) = match params.assignable_dest {
+            AssignableDest::Off => (0.0, params.resonance, self.base_hz),
+            AssignableDest::Resonance => (
                 0.0,
                 params.resonance + assign_level * assign_amount,
                 self.base_hz,
             ),
-            Env3Dest::Pitch => {
+            AssignableDest::Pitch => {
                 let hz = hz_times_octaves(self.base_hz, assign_level * assign_amount);
                 let hz = hz.clamp(20.0, sample_rate_hz * 0.25);
                 (0.0, params.resonance, hz)
             }
-            Env3Dest::Cutoff => (assign_level * assign_amount, params.resonance, self.base_hz),
+            AssignableDest::Cutoff => {
+                (assign_level * assign_amount, params.resonance, self.base_hz)
+            }
         };
         let cutoff_hz = hz_times_octaves(params.cutoff_hz, filter_octaves + assign_cutoff_octaves);
         let levels = AtPitchLevels {
@@ -276,8 +279,8 @@ impl Voices {
     }
 }
 
-fn effective_envelope_amount(amount: f32, envvel: f32, velocity: f32) -> f32 {
-    amount * (1.0 - envvel + envvel * velocity)
+fn effective_envelope_amount(amount: f32, env_vel: f32, velocity: f32) -> f32 {
+    amount * (1.0 - env_vel + env_vel * velocity)
 }
 
 fn normalize_blend(levels: AtPitchLevels, samples: [f32; 4]) -> f32 {

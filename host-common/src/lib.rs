@@ -168,7 +168,7 @@ fn try_open_midi_input(
         &port,
         "stone-raft-input",
         move |_stamp, message, _| {
-            if let Some(event) = parse_midi_message(message) {
+            if let Some(event) = MixerEvent::from_midi_bytes(message) {
                 push_event(&producer, event);
             }
         },
@@ -197,28 +197,6 @@ fn select_midi_port(
 
     let index = prompt_index("Select MIDI input number", ports.len())?;
     Ok(ports[index].clone())
-}
-
-fn parse_midi_message(message: &[u8]) -> Option<MixerEvent> {
-    if message.len() < 2 {
-        return None;
-    }
-
-    let status = message[0];
-    let note = message[1];
-    let velocity = message.get(2).copied().unwrap_or(0);
-    let kind = status & 0xF0;
-    let channel = (status & 0x0F) + 1;
-
-    match kind {
-        0x90 if velocity > 0 => Some(MixerEvent::MidiNoteOn {
-            channel,
-            note,
-            velocity,
-        }),
-        0x90 | 0x80 => Some(MixerEvent::MidiNoteOff { channel, note }),
-        _ => None,
-    }
 }
 
 fn print_keyboard_map() {
@@ -362,22 +340,5 @@ fn dispatch_param_line(
             }
         }
         CommandOutcome::Error(err) => println!("error: {err}"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn midi_parse_keeps_channel_5() {
-        match parse_midi_message(&[0x94, 60, 100]) {
-            Some(MixerEvent::MidiNoteOn {
-                channel: 5,
-                note: 60,
-                velocity: 100,
-            }) => {}
-            other => panic!("unexpected {other:?}"),
-        }
     }
 }

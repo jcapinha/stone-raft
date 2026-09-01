@@ -78,7 +78,7 @@ impl Adsr {
         }
     }
 
-    /// Immediate silence. Used when a mixer slot is turned off.
+    /// Immediate silence. Used when a mixer instance is turned off.
     pub fn force_idle(&mut self) {
         self.stage = EnvelopeStage::Idle;
         self.level = 0.0;

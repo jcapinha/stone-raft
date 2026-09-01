@@ -125,13 +125,13 @@ Each engine has a fixed set of 4 voices (tunable after measuring the Daisy). Not
 Shared host plumbing opens a midir input when available: auto-select if there is exactly one port, otherwise list ports and pick by number. Note on/off carry MIDI channel and the mixer routes by listen channel. If no MIDI port exists, a crossterm one-octave laptop-keyboard fallback (from C4, fixed velocity) plays the current engine when that engine is on. Param line commands work in both paths. Under WSL, terminal key release is not available, so keyboard-fallback notes rely on amp release and voice stealing. On native Windows (`host-windows`), the console reports key-up so hold-to-play works.
 
 **Host-side patch copy for show**
-The audio thread owns the mixer. The host stores params, volume, enabled, and listen channel per instance and updates them when it enqueues slot commands. `show` prints that copy. Param apply rules live in the engine crate so `envlink` and `envcopy` match the sounding engine.
+The audio thread owns the mixer. The host stores params, volume, enabled, and listen channel per instance and updates them when it enqueues instance commands (`MixerEvent::ToInstance`, 1-based). `show` prints that copy. Param apply rules live in the engine crate so `envlink` and `envcopy` match the sounding engine.
 
 **WSL for development, Windows for reliable play**
 Edit code and run engine tests in WSL. Optional `host-wsl` is fine for quick checks but WSLg audio is flaky. Reliable listening, real MIDI devices, and keyboard hold-to-play use `host-windows` built with the MSVC toolchain from PowerShell (repo reachable via `\\wsl$\...`). Reevaluate this two-host laptop split when the Daisy arrives.
 
 **Serial MIDI in (Daisy)**
-MIDI reaches the Daisy over serial (DIN/TRS) from the Polyend via a MIDI thru box, through an optocoupler into a UART pin. USB MIDI is not used on the Daisy; it is fine on the laptop (via midir) for development against a software keyboard or the Polyend.
+MIDI reaches the Daisy over serial (DIN/TRS) from the Polyend via a MIDI thru box, through an optocoupler into a UART pin. USB MIDI is not used on the Daisy; it is fine on the laptop (via midir) for development against a software keyboard or the Polyend. Note on/off bytes are parsed by `MixerEvent::from_midi_bytes` in the engine crate so laptop and Daisy hosts share one mapping.
 
 **Mono, 48 kHz to start**
 The engine produces mono audio at 48 kHz (matching the Daisy codec). The mixer is designed so stereo output and per-engine panning can be added later.

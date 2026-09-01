@@ -8,7 +8,7 @@ mod voices;
 
 pub use envelope::{Adsr, AdsrTimes, EnvelopeStage, velocity_to_amp};
 pub use filter::Svf;
-pub use mixer::{ENGINE_COUNT, Mixer, MixerEvent, SlotEvent};
+pub use mixer::{ENGINE_COUNT, InstanceEvent, Mixer, MixerEvent};
 pub use oscillator::{Oscillator, PULSE_WIDTH_DEFAULT, PULSE_WIDTH_MAX, PULSE_WIDTH_MIN, Waveform};
 
 use voices::Voices;
@@ -21,7 +21,7 @@ const AMT_MAX: f32 = 8.0;
 
 /// Destination for the assignable envelope. More destinations can be added later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Env3Dest {
+pub enum AssignableDest {
     Off,
     Resonance,
     Pitch,
@@ -112,13 +112,13 @@ pub enum ControlEvent {
         field: EnvelopeField,
         value: f32,
     },
-    SetFiltEnvAmt {
+    SetFilterEnvAmount {
         amount: f32,
     },
-    SetEnv3Dest {
-        dest: Env3Dest,
+    SetAssignableDest {
+        dest: AssignableDest,
     },
-    SetEnv3Amt {
+    SetAssignableAmount {
         amount: f32,
     },
     EnvCopy,
@@ -180,14 +180,14 @@ pub struct EngineParams {
     pub pulse_width: f32,
     pub cutoff_hz: f32,
     pub resonance: f32,
-    pub amp: AdsrTimes,
+    pub amp_env: AdsrTimes,
     pub filter_env: AdsrTimes,
-    pub assign_env: AdsrTimes,
-    pub filtenv_amt: f32,
-    pub env3_amt: f32,
-    pub env3_dest: Env3Dest,
+    pub assignable_env: AdsrTimes,
+    pub filter_env_amount: f32,
+    pub assignable_amount: f32,
+    pub assignable_dest: AssignableDest,
     pub env_link: bool,
-    pub envvel: f32,
+    pub env_vel: f32,
     pub sub_vol: f32,
     pub sub_octaves: SubOctaves,
 }
@@ -202,14 +202,14 @@ impl Default for EngineParams {
             pulse_width: PULSE_WIDTH_DEFAULT,
             cutoff_hz: 2_000.0,
             resonance: 0.2,
-            amp: AdsrTimes::default(),
+            amp_env: AdsrTimes::default(),
             filter_env: AdsrTimes::default(),
-            assign_env: AdsrTimes::default(),
-            filtenv_amt: 0.0,
-            env3_amt: 0.0,
-            env3_dest: Env3Dest::Off,
+            assignable_env: AdsrTimes::default(),
+            filter_env_amount: 0.0,
+            assignable_amount: 0.0,
+            assignable_dest: AssignableDest::Off,
             env_link: false,
-            envvel: 0.0,
+            env_vel: 0.0,
             sub_vol: 0.0,
             sub_octaves: SubOctaves::One,
         }
@@ -219,9 +219,9 @@ impl Default for EngineParams {
 impl EngineParams {
     pub fn envelope(&self, which: EnvelopeId) -> AdsrTimes {
         match which {
-            EnvelopeId::Amp => self.amp,
+            EnvelopeId::Amp => self.amp_env,
             EnvelopeId::Filter => self.filter_env,
-            EnvelopeId::Assignable => self.assign_env,
+            EnvelopeId::Assignable => self.assignable_env,
         }
     }
 
@@ -292,16 +292,16 @@ impl EngineParams {
                 self.set_envelope(which, times);
                 ParamEffects::ENVELOPES
             }
-            ControlEvent::SetFiltEnvAmt { amount } => {
-                self.filtenv_amt = amount.clamp(AMT_MIN, AMT_MAX);
+            ControlEvent::SetFilterEnvAmount { amount } => {
+                self.filter_env_amount = amount.clamp(AMT_MIN, AMT_MAX);
                 ParamEffects::NONE
             }
-            ControlEvent::SetEnv3Dest { dest } => {
-                self.env3_dest = dest;
+            ControlEvent::SetAssignableDest { dest } => {
+                self.assignable_dest = dest;
                 ParamEffects::NONE
             }
-            ControlEvent::SetEnv3Amt { amount } => {
-                self.env3_amt = amount.clamp(AMT_MIN, AMT_MAX);
+            ControlEvent::SetAssignableAmount { amount } => {
+                self.assignable_amount = amount.clamp(AMT_MIN, AMT_MAX);
                 ParamEffects::NONE
             }
             ControlEvent::EnvCopy => {
@@ -318,7 +318,7 @@ impl EngineParams {
                 }
             }
             ControlEvent::SetEnvVel { amount } => {
-                self.envvel = amount.clamp(0.0, 1.0);
+                self.env_vel = amount.clamp(0.0, 1.0);
                 ParamEffects::NONE
             }
             ControlEvent::SetSubVol { amount } => {
@@ -337,10 +337,10 @@ impl EngineParams {
         let times = times.clamped();
         match which {
             EnvelopeId::Amp => {
-                self.amp = times;
+                self.amp_env = times;
                 if self.env_link {
                     self.filter_env = times;
-                    self.assign_env = times;
+                    self.assignable_env = times;
                 }
             }
             EnvelopeId::Filter => {
@@ -349,7 +349,7 @@ impl EngineParams {
             }
             EnvelopeId::Assignable => {
                 self.unlink_if_needed();
-                self.assign_env = times;
+                self.assignable_env = times;
             }
         }
     }
@@ -361,8 +361,8 @@ impl EngineParams {
     }
 
     fn copy_amp_times_to_extra_envelopes(&mut self) {
-        self.filter_env = self.amp;
-        self.assign_env = self.amp;
+        self.filter_env = self.amp_env;
+        self.assignable_env = self.amp_env;
     }
 }
 
@@ -495,7 +495,7 @@ mod tests {
     }
 
     fn set_fast_amp_sustain(engine: &mut Engine) {
-        let mut times = engine.params().amp;
+        let mut times = engine.params().amp_env;
         times.attack_ms = 1.0;
         times.decay_ms = 1.0;
         times.sustain = 1.0;
@@ -510,8 +510,8 @@ mod tests {
         set_envelope(engine, EnvelopeId::Filter, times);
     }
 
-    fn set_fast_assign_env_sustain(engine: &mut Engine) {
-        let mut times = engine.params().assign_env;
+    fn set_fast_assignable_env_sustain(engine: &mut Engine) {
+        let mut times = engine.params().assignable_env;
         times.attack_ms = 1.0;
         times.decay_ms = 1.0;
         times.sustain = 1.0;
@@ -887,8 +887,8 @@ mod tests {
             set_fast_amp_sustain(engine);
             set_fast_filter_env_sustain(engine);
         }
-        closed.apply(ControlEvent::SetFiltEnvAmt { amount: 0.0 });
-        opened.apply(ControlEvent::SetFiltEnvAmt { amount: 4.0 });
+        closed.apply(ControlEvent::SetFilterEnvAmount { amount: 0.0 });
+        opened.apply(ControlEvent::SetFilterEnvAmount { amount: 4.0 });
 
         note_on(&mut closed, 57, 127);
         note_on(&mut opened, 57, 127);
@@ -917,15 +917,15 @@ mod tests {
             set_res(engine, 0.0);
             set_fast_amp_sustain(engine);
             set_fast_filter_env_sustain(engine);
-            set_fast_assign_env_sustain(engine);
+            set_fast_assignable_env_sustain(engine);
         }
-        stacked.apply(ControlEvent::SetEnv3Dest {
-            dest: Env3Dest::Cutoff,
+        stacked.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Cutoff,
         });
-        stacked.apply(ControlEvent::SetFiltEnvAmt { amount: 2.0 });
-        stacked.apply(ControlEvent::SetEnv3Amt { amount: 2.0 });
-        combined.apply(ControlEvent::SetFiltEnvAmt { amount: 4.0 });
-        combined.apply(ControlEvent::SetEnv3Amt { amount: 0.0 });
+        stacked.apply(ControlEvent::SetFilterEnvAmount { amount: 2.0 });
+        stacked.apply(ControlEvent::SetAssignableAmount { amount: 2.0 });
+        combined.apply(ControlEvent::SetFilterEnvAmount { amount: 4.0 });
+        combined.apply(ControlEvent::SetAssignableAmount { amount: 0.0 });
 
         note_on(&mut stacked, 57, 127);
         note_on(&mut combined, 57, 127);
@@ -952,11 +952,11 @@ mod tests {
         set_cutoff(&mut engine, 10_000.0);
         set_res(&mut engine, 0.0);
         set_fast_amp_sustain(&mut engine);
-        set_fast_assign_env_sustain(&mut engine);
-        engine.apply(ControlEvent::SetEnv3Dest {
-            dest: Env3Dest::Pitch,
+        set_fast_assignable_env_sustain(&mut engine);
+        engine.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Pitch,
         });
-        engine.apply(ControlEvent::SetEnv3Amt { amount: 1.0 });
+        engine.apply(ControlEvent::SetAssignableAmount { amount: 1.0 });
 
         let note = 57u8;
         note_on(&mut engine, note, 127);
@@ -997,20 +997,20 @@ mod tests {
         assert!((engine.params().filter_env.decay_ms - 80.0).abs() < f32::EPSILON);
         assert!((engine.params().filter_env.sustain - 0.4).abs() < f32::EPSILON);
         assert!((engine.params().filter_env.release_ms - 150.0).abs() < f32::EPSILON);
-        assert!((engine.params().assign_env.attack_ms - 50.0).abs() < f32::EPSILON);
+        assert!((engine.params().assignable_env.attack_ms - 50.0).abs() < f32::EPSILON);
         assert!(!engine.params().env_link);
 
         engine.apply(ControlEvent::SetEnvLink { on: true });
         assert!(engine.params().env_link);
         patch_field(&mut engine, EnvelopeId::Amp, EnvelopeField::Attack, 90.0);
         assert!((engine.params().filter_env.attack_ms - 90.0).abs() < f32::EPSILON);
-        assert!((engine.params().assign_env.attack_ms - 90.0).abs() < f32::EPSILON);
+        assert!((engine.params().assignable_env.attack_ms - 90.0).abs() < f32::EPSILON);
 
         patch_field(&mut engine, EnvelopeId::Filter, EnvelopeField::Attack, 12.0);
         assert!(!engine.params().env_link);
         assert!((engine.params().filter_env.attack_ms - 12.0).abs() < f32::EPSILON);
         patch_field(&mut engine, EnvelopeId::Amp, EnvelopeField::Attack, 200.0);
-        assert!((engine.params().amp.attack_ms - 200.0).abs() < f32::EPSILON);
+        assert!((engine.params().amp_env.attack_ms - 200.0).abs() < f32::EPSILON);
         assert!((engine.params().filter_env.attack_ms - 12.0).abs() < f32::EPSILON);
 
         engine.apply(ControlEvent::SetEnvLink { on: true });
@@ -1021,7 +1021,7 @@ mod tests {
             33.0,
         );
         assert!(!engine.params().env_link);
-        assert!((engine.params().assign_env.decay_ms - 33.0).abs() < f32::EPSILON);
+        assert!((engine.params().assignable_env.decay_ms - 33.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1037,7 +1037,7 @@ mod tests {
                 release_ms: -8.0,
             },
         );
-        let amp = engine.params().amp;
+        let amp = engine.params().amp_env;
         assert_eq!(amp.attack_ms, 0.0);
         assert_eq!(amp.decay_ms, 0.0);
         assert_eq!(amp.sustain, 1.0);
@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn envvel_scales_pitch_dest_by_velocity() {
+    fn env_vel_scales_pitch_dest_by_velocity() {
         let mut quiet = Engine::new(SAMPLE_RATE_HZ);
         let mut loud = Engine::new(SAMPLE_RATE_HZ);
         for engine in [&mut quiet, &mut loud] {
@@ -1053,11 +1053,11 @@ mod tests {
             set_cutoff(engine, 10_000.0);
             set_res(engine, 0.0);
             set_fast_amp_sustain(engine);
-            set_fast_assign_env_sustain(engine);
-            engine.apply(ControlEvent::SetEnv3Dest {
-                dest: Env3Dest::Pitch,
+            set_fast_assignable_env_sustain(engine);
+            engine.apply(ControlEvent::SetAssignableDest {
+                dest: AssignableDest::Pitch,
             });
-            engine.apply(ControlEvent::SetEnv3Amt { amount: 1.0 });
+            engine.apply(ControlEvent::SetAssignableAmount { amount: 1.0 });
             engine.apply(ControlEvent::SetEnvVel { amount: 1.0 });
         }
 
@@ -1081,7 +1081,7 @@ mod tests {
         );
         assert!(
             quiet_at_base > quiet_at_octave,
-            "low velocity with envvel 1 should stay nearer the original pitch; base={quiet_at_base} octave={quiet_at_octave}"
+            "low velocity with env_vel 1 should stay nearer the original pitch; base={quiet_at_base} octave={quiet_at_octave}"
         );
     }
 
@@ -1192,17 +1192,17 @@ mod tests {
     }
 
     #[test]
-    fn sub_tracks_env3_pitch_destination() {
+    fn sub_tracks_assignable_pitch_destination() {
         let mut engine = Engine::new(SAMPLE_RATE_HZ);
         set_wave(&mut engine, Waveform::Saw);
         set_cutoff(&mut engine, 10_000.0);
         set_res(&mut engine, 0.0);
         set_fast_amp_sustain(&mut engine);
-        set_fast_assign_env_sustain(&mut engine);
-        engine.apply(ControlEvent::SetEnv3Dest {
-            dest: Env3Dest::Pitch,
+        set_fast_assignable_env_sustain(&mut engine);
+        engine.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Pitch,
         });
-        engine.apply(ControlEvent::SetEnv3Amt { amount: 1.0 });
+        engine.apply(ControlEvent::SetAssignableAmount { amount: 1.0 });
         set_sub_vol(&mut engine, 1.0);
         set_sub_oct(&mut engine, SubOctaves::One);
 
