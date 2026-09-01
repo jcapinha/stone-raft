@@ -17,6 +17,7 @@ To stress-test a plan and update those files as you decide, use `/grill-with-doc
 - [`host-common/`](host-common) — shared laptop host plumbing (audio/MIDI wiring, param commands, keyboard fallback) used by both OS binaries.
 - [`host-wsl/`](host-wsl) — thin WSL/Linux binary for development and optional quick listening (WSLg audio can be flaky).
 - [`host-windows/`](host-windows) — thin native Windows binary for reliable play, MIDI devices, and keyboard hold-to-play (MSVC toolchain).
+- [`host-daisy/`](host-daisy) — Seed 3 firmware and hardware diagnostics built with daisy-embassy.
 
 ## Running on WSL (`host-wsl`)
 
@@ -157,6 +158,94 @@ random
 In **keyboard mode**, press `/` to enter one command line, type the command, then Enter. In **MIDI mode** (line input already active), type the command on its own line, or `q` to quit.
 
 Note release depends on the terminal. Most Unix terminals, including Windows Terminal running WSL, never report that a key came back up, so notes rely on the amp release stage and 4-voice stealing rather than true key-up. The native Windows console (used by `host-windows`) does report key release, so hold-to-play works there.
+
+## Daisy Seed 3 double-blink diagnostic
+
+The `double-blink` binary tests the Rust cross-compiler, Seed 3 startup, onboard LED, and firmware conversion. It flashes twice for 100 ms, then stays off for 1.7 seconds. The pattern repeats every two seconds.
+
+The commands remain separate until the manual build and flash workflow is proven. The generated `double-blink.bin` does not use the synth engine.
+
+### PowerShell
+
+Install the ARM Rust target and binary conversion tool once:
+
+```powershell
+rustup target add thumbv7em-none-eabihf
+rustup component add llvm-tools-preview
+cargo install cargo-binutils
+```
+
+Install `dfu-util` with [Scoop](https://scoop.sh/), a Windows command-line package manager. Run these commands in a regular PowerShell window, not an administrator window:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+scoop install main/dfu-util
+dfu-util --version
+```
+
+The first command allows locally installed PowerShell scripts for your Windows user. Windows may ask you to confirm the change. The second command installs Scoop, and the third installs `dfu-util`.
+
+`PATH` is the list of folders Windows searches when you enter a command such as `dfu-util`. Scoop automatically creates a command shortcut in its `shims` folder and puts that folder on `PATH`, so there is no folder to add manually. If `dfu-util --version` is not found immediately after installation, close PowerShell, open it again, return to the repository, and retry the command.
+
+When working through `\\wsl$\...`, keep Cargo output on the Windows drive as described in the Windows host setup:
+
+```powershell
+$env:CARGO_TARGET_DIR = "$env:USERPROFILE\stone-raft-target"
+$env:CARGO_INCREMENTAL = "0"
+cargo build -p host-daisy --bin double-blink --target thumbv7em-none-eabihf --release
+cargo objcopy -p host-daisy --bin double-blink --target thumbv7em-none-eabihf --release -- -O binary .\double-blink.bin
+```
+
+The last command creates `double-blink.bin` in the repository root. Flashing it replaces the program currently stored in internal flash.
+
+1. Connect the Seed 3 over USB.
+2. Hold BOOT.
+3. Press and release RESET.
+4. Release BOOT.
+5. Confirm that the board is visible as an STM32 DFU device:
+
+```powershell
+dfu-util --list
+```
+
+The device normally reports USB ID `0483:df11`. Flash the binary:
+
+```powershell
+dfu-util -a 0 -s 0x08000000:leave -D .\double-blink.bin
+```
+
+If Windows sees the device but `dfu-util` cannot open it, follow Daisy's [Zadig driver reset instructions](https://docs.daisy.audio/tutorials/zadig/) and select the WinUSB driver.
+
+### WSL
+
+Install the build and DFU tools:
+
+```bash
+rustup target add thumbv7em-none-eabihf
+rustup component add llvm-tools-preview
+cargo install cargo-binutils
+sudo apt update
+sudo apt install -y dfu-util
+```
+
+WSL cannot access the Seed 3 USB device until Windows attaches it to WSL. Follow Microsoft's [USB device connection instructions](https://learn.microsoft.com/windows/wsl/connect-usb), put the Seed into DFU mode, and attach the device shown by `usbipd list`.
+
+Build and convert the diagnostic:
+
+```bash
+cargo build -p host-daisy --bin double-blink --target thumbv7em-none-eabihf --release
+cargo objcopy -p host-daisy --bin double-blink --target thumbv7em-none-eabihf --release -- -O binary ./double-blink.bin
+```
+
+Confirm the DFU device, then flash:
+
+```bash
+dfu-util --list
+dfu-util -a 0 -s 0x08000000:leave -D ./double-blink.bin
+```
+
+After flashing, confirm the double-blink pattern. Press RESET and then disconnect and reconnect USB power. The same pattern should return after both restarts.
 
 ## Running `engine`'s tests
 

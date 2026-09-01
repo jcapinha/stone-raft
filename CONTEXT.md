@@ -136,8 +136,11 @@ MIDI reaches the Daisy over serial (DIN/TRS) from the Polyend via a MIDI thru bo
 **Mono, 48 kHz to start**
 The engine produces mono audio at 48 kHz (matching the Daisy codec). The mixer is designed so stereo output and per-engine panning can be added later.
 
-**Flash and debug with a probe**
-Flash via the Daisy's USB DFU bootloader, and use a debug probe (ST-Link or similar) from the start for defmt logs and step debugging.
+**Daisy firmware bring-up and flashing**
+The permanent `double-blink` diagnostic is the first Seed 3 firmware test. Build and convert it with explicit commands, then flash it directly to internal memory through the STM32 ROM DFU bootloader. Add PowerShell and WSL flash scripts only after this manual workflow is proven. A debug probe (ST-Link or similar) remains planned for defmt logs and step debugging.
+
+**Daisy hardware bring-up sequence**
+After double blink, the main next steps are: (2) a stable low-volume test tone through the Seed 3 codec, (3) the Daisy audio callback connected to a minimal path through `engine`, and (4) the full mixer plus serial MIDI integration. Delete each step from this entry once it is implemented and represented by nearby code documentation or tests.
 
 **Lock-free control signals into the audio callback**
 The audio callback must never block or wait, since a stall causes audible clicks. Never use a `Mutex` on that path. Note on/off and discrete param changes use a host-owned lock-free SPSC queue (`rtrb` on the laptop). Only the audio thread calls into the engine. On the laptop hosts, a `Mutex` may guard the queue *producer* when both MIDI and the terminal push events; that lock is never taken inside the audio callback. Atomics plus smoothing are reserved for a later high-rate knob/CC path.
