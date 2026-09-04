@@ -86,10 +86,11 @@ The four at-pitch oscillator levels are normalized as weights. Sub is additive. 
 | `sub <0..1>`; `suboct 1|2` | Additive sine sub level and octave; defaults are `0` and `1` |
 | `fenv amt <signed>` | Filter envelope amount in octaves |
 | `fenv a <ms>`; `fenv d <ms>`; `fenv s <0..1>`; `fenv r <ms>` | Filter ADSR |
-| `asenv dest off|res|pitch|cutoff`; `asenv amt <signed>` | Assignable destination and amount; octaves for pitch/cutoff, about ±1 for resonance; `resonance` aliases `res` |
+| `asenv dest off|res|pitch|cutoff|pw|amp`; `asenv amt <signed>` | Assignable destination and amount; octaves for pitch/cutoff, linear for resonance, pulse width, and amp; aliases: `resonance`, `pulse`, `pwm` |
 | `asenv a <ms>`; `asenv d <ms>`; `asenv s <0..1>`; `asenv r <ms>` | Assignable ADSR |
+| `lfo 1` / `lfo 2` dest off|res|pitch|cutoff|pw|amp; amt; rate; wave; retrig | Two assignable LFOs; bipolar swing around the knob; rate 0.05..20 Hz; retrig defaults on; waves `sine`, `tri`, `square`, `saw`, `sh` (aliases `triangle`, `sq`, `snh`); `lfo1` is invalid |
 | `env copy`; `env link on|off`; `env vel <0..1>` | Copy amp times, link envelope times, and scale extra envelopes by velocity |
-| `random` | Randomize subtractive parameters and volume `0.2..1.0`; keep enabled state and channel |
+| `random` | Randomize subtractive parameters, both LFOs, and volume `0.2..1.0`; keep enabled state and channel |
 
 `show` and `random` print qualified `eng N` lines and do not change enabled state or listen channel.
 
@@ -172,6 +173,8 @@ Confirm the double blink after flashing the firmware. If necessary, press RESET,
 
 ## Tests
 
-```bash
-cargo test -p engine
+Same command in WSL or PowerShell:
+
+```text
+cargo test -p engine -p host-common
 ```

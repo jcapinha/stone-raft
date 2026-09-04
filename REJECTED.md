@@ -16,3 +16,7 @@ Closed doors. Do not re-propose these unless the author explicitly reopens them 
 - **Per-voice osc mix levels** — rejected; levels are per engine instance, shared by all voices.
 - **Sub inside the normalized at-pitch mix** — rejected; sub is additive after normalization, with its own `subvol`.
 - **`wave` preset leaving `subvol` untouched** — rejected; solo preset zeros sub as well.
+- **Committed portable play launcher** — rejected; `./play` stays a local gitignored shortcut. The README PowerShell recipe remains the shared play path.
+- **Runtime path discovery for ./play (`wslpath`)** — rejected; the local script hard-codes `\\wsl$\Ubuntu\home\capinha\audio_experiments\stone-raft`.
+- **Separate destination list for LFOs** — abandoned. LFOs share `AssignableDest` with the assignable envelope.
+- **Glued LFO tokens (`lfo1`)** — parser requires `lfo 1` with a space, matching `eng 2`.
