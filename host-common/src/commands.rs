@@ -1,8 +1,9 @@
 //! Terminal command parsing and host-side engine state.
 
 use engine::{
-    AdsrTimes, AssignableDest, ControlEvent, ENGINE_COUNT, EngineParams, EnvelopeField, EnvelopeId,
-    InstanceEvent, MixerEvent, SubOctaves, Waveform,
+    AdsrTimes, AssignableDest, ControlEvent, EngineParams, EnvelopeField, EnvelopeId,
+    InstanceEvent, LfoId, LfoParams, LfoWave, MixerEvent, SubOctaves, Waveform, ENGINE_COUNT,
+    LFO_RATE_MAX_HZ, LFO_RATE_MIN_HZ,
 };
 use rand::Rng;
 
@@ -22,11 +23,24 @@ const RANDOM_VOL_MAX: f32 = 1.0;
 
 const RANDOM_PULSE_MIN: f32 = 0.05;
 const RANDOM_PULSE_MAX: f32 = 0.95;
-const RANDOM_ASSIGNABLE_DESTS: [AssignableDest; 4] = [
+const RANDOM_PW_AMT_MIN: f32 = -0.4;
+const RANDOM_PW_AMT_MAX: f32 = 0.4;
+const RANDOM_AMP_AMT_MIN: f32 = -0.8;
+const RANDOM_AMP_AMT_MAX: f32 = 0.8;
+const RANDOM_ASSIGNABLE_DESTS: [AssignableDest; 6] = [
     AssignableDest::Off,
     AssignableDest::Resonance,
     AssignableDest::Pitch,
     AssignableDest::Cutoff,
+    AssignableDest::PulseWidth,
+    AssignableDest::Amp,
+];
+const RANDOM_LFO_WAVES: [LfoWave; 5] = [
+    LfoWave::Sine,
+    LfoWave::Triangle,
+    LfoWave::Square,
+    LfoWave::Saw,
+    LfoWave::SampleHold,
 ];
 
 struct InstanceShadow {
@@ -182,8 +196,12 @@ pub(crate) fn print_help() {
     println!("  amp a|d|r <ms>   amp s <0..1>");
     println!("  fenv a|d|r <ms>   fenv s <0..1>   fenv amt <signed octaves>");
     println!("  asenv a|d|r <ms>   asenv s <0..1>");
-    println!("  asenv dest off|res|pitch|cutoff   asenv amt <signed>");
+    println!("  asenv dest off|res|pitch|cutoff|pw|amp   asenv amt <signed>");
     println!("  env copy   env link on|off   env vel <0..1>");
+    println!("  lfo 1|2 dest off|res|pitch|cutoff|pw|amp   lfo 1|2 amt <signed>");
+    println!(
+        "  lfo 1|2 rate <0.05..20>   lfo 1|2 wave sine|tri|square|saw|sh   lfo 1|2 retrig on|off"
+    );
 }
 
 fn apply_parsed(session: &mut CommandSession, command: &ParsedCommand) {
@@ -197,6 +215,13 @@ fn apply_parsed(session: &mut CommandSession, command: &ParsedCommand) {
 
 fn is_glued_eng_token(cmd: &str) -> bool {
     match cmd.strip_prefix("eng") {
+        Some(rest) if !rest.is_empty() => rest.chars().all(|c| c.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+fn is_glued_lfo_token(cmd: &str) -> bool {
+    match cmd.strip_prefix("lfo") {
         Some(rest) if !rest.is_empty() => rest.chars().all(|c| c.is_ascii_digit()),
         _ => false,
     }
@@ -242,6 +267,9 @@ fn parse_line_commands(
     if is_glued_eng_token(&first) {
         return Err("use 'eng N' with a space (for example eng 2)".to_string());
     }
+    if is_glued_lfo_token(&first) {
+        return Err("use 'lfo N' with a space (for example lfo 1)".to_string());
+    }
 
     if first == "eng" {
         if tokens.len() == 1 {
@@ -274,6 +302,9 @@ fn parse_targeted_command(line: &str, instance: usize) -> Result<ParsedCommand, 
         .to_ascii_lowercase();
     if is_glued_eng_token(&cmd) {
         return Err("use 'eng N' with a space (for example eng 2)".to_string());
+    }
+    if is_glued_lfo_token(&cmd) {
+        return Err("use 'lfo N' with a space (for example lfo 1)".to_string());
     }
 
     match cmd.as_str() {
@@ -380,7 +411,56 @@ fn assignable_dest_name(dest: AssignableDest) -> &'static str {
         AssignableDest::Resonance => "res",
         AssignableDest::Pitch => "pitch",
         AssignableDest::Cutoff => "cutoff",
+        AssignableDest::PulseWidth => "pw",
+        AssignableDest::Amp => "amp",
     }
+}
+
+fn lfo_wave_name(wave: LfoWave) -> &'static str {
+    match wave {
+        LfoWave::Sine => "sine",
+        LfoWave::Triangle => "tri",
+        LfoWave::Square => "square",
+        LfoWave::Saw => "saw",
+        LfoWave::SampleHold => "sh",
+    }
+}
+
+fn random_amount_for_dest<R: Rng>(rng: &mut R, dest: AssignableDest) -> f32 {
+    match dest {
+        AssignableDest::Resonance => rng.gen_range(RANDOM_RES_AMT_MIN..=RANDOM_RES_AMT_MAX),
+        AssignableDest::PulseWidth => rng.gen_range(RANDOM_PW_AMT_MIN..=RANDOM_PW_AMT_MAX),
+        AssignableDest::Amp => rng.gen_range(RANDOM_AMP_AMT_MIN..=RANDOM_AMP_AMT_MAX),
+        AssignableDest::Off | AssignableDest::Pitch | AssignableDest::Cutoff => {
+            rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX)
+        }
+    }
+}
+
+fn random_lfo<R: Rng>(rng: &mut R) -> LfoParams {
+    let dest = RANDOM_ASSIGNABLE_DESTS[rng.gen_range(0..RANDOM_ASSIGNABLE_DESTS.len())];
+    LfoParams {
+        dest,
+        amount: random_amount_for_dest(rng, dest),
+        rate_hz: log_uniform(rng, LFO_RATE_MIN_HZ, LFO_RATE_MAX_HZ),
+        wave: RANDOM_LFO_WAVES[rng.gen_range(0..RANDOM_LFO_WAVES.len())],
+        retrigger: rng.gen_bool(0.5),
+    }
+}
+
+fn format_lfo_lines(which: usize, lfo: &LfoParams) -> String {
+    let retrig = if lfo.retrigger { "on" } else { "off" };
+    format!(
+        "lfo {which} dest {}\n\
+         lfo {which} amt {:.2}\n\
+         lfo {which} rate {:.2}\n\
+         lfo {which} wave {}\n\
+         lfo {which} retrig {retrig}\n",
+        assignable_dest_name(lfo.dest),
+        lfo.amount,
+        lfo.rate_hz,
+        lfo_wave_name(lfo.wave),
+    )
 }
 
 fn qualified(n: usize, rest: &str) -> String {
@@ -396,7 +476,7 @@ fn qualify_block(n: usize, body: &str) -> String {
 
 fn format_param_lines(params: &EngineParams) -> String {
     let link_name = if params.env_link { "on" } else { "off" };
-    format!(
+    let mut out = format!(
         "saw {:.2}\n\
          sq {:.2}\n\
          tri {:.2}\n\
@@ -448,7 +528,10 @@ fn format_param_lines(params: &EngineParams) -> String {
         params.assignable_env.sustain,
         params.assignable_env.release_ms,
         params.env_vel,
-    )
+    );
+    out.push_str(&format_lfo_lines(1, &params.lfos[0]));
+    out.push_str(&format_lfo_lines(2, &params.lfos[1]));
+    out
 }
 
 fn format_eng_status(session: &CommandSession) -> String {
@@ -493,12 +576,8 @@ fn generate_random_patch<R: Rng>(rng: &mut R, instance: usize) -> ParsedCommand 
     let assign_env = if env_link { amp } else { random_adsr(rng) };
     let filter_env_amount = rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX);
     let assignable_dest = RANDOM_ASSIGNABLE_DESTS[rng.gen_range(0..RANDOM_ASSIGNABLE_DESTS.len())];
-    let assignable_amount = match assignable_dest {
-        AssignableDest::Resonance => rng.gen_range(RANDOM_RES_AMT_MIN..=RANDOM_RES_AMT_MAX),
-        AssignableDest::Off | AssignableDest::Pitch | AssignableDest::Cutoff => {
-            rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX)
-        }
-    };
+    let assignable_amount = random_amount_for_dest(rng, assignable_dest);
+    let lfos = [random_lfo(rng), random_lfo(rng)];
     let env_vel = rng.gen_range(0.0..=1.0);
     let sub_vol = rng.gen_range(0.0..=1.0);
     let sub_octaves = if rng.gen_bool(0.5) {
@@ -525,6 +604,7 @@ fn generate_random_patch<R: Rng>(rng: &mut R, instance: usize) -> ParsedCommand 
         env_vel,
         sub_vol,
         sub_octaves,
+        lfos,
     };
     let n = instance;
     let mut report = qualified(n, &format!("vol {volume:.2}"));
@@ -578,6 +658,44 @@ fn generate_random_patch<R: Rng>(rng: &mut R, instance: usize) -> ParsedCommand 
         wrap_engine(instance, ControlEvent::SetEnvVel { amount: env_vel }),
         to_instance(instance, InstanceEvent::SetVolume { amount: volume }),
     ];
+    for which in [LfoId::One, LfoId::Two] {
+        let lfo = lfos[which.index()];
+        events.push(wrap_engine(
+            instance,
+            ControlEvent::SetLfoDest {
+                which,
+                dest: lfo.dest,
+            },
+        ));
+        events.push(wrap_engine(
+            instance,
+            ControlEvent::SetLfoAmount {
+                which,
+                amount: lfo.amount,
+            },
+        ));
+        events.push(wrap_engine(
+            instance,
+            ControlEvent::SetLfoRate {
+                which,
+                rate_hz: lfo.rate_hz,
+            },
+        ));
+        events.push(wrap_engine(
+            instance,
+            ControlEvent::SetLfoWave {
+                which,
+                wave: lfo.wave,
+            },
+        ));
+        events.push(wrap_engine(
+            instance,
+            ControlEvent::SetLfoRetrig {
+                which,
+                on: lfo.retrigger,
+            },
+        ));
+    }
 
     if env_link {
         events.push(wrap_engine(instance, ControlEvent::SetEnvLink { on: true }));
@@ -736,7 +854,8 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
         ),
         "asenv" => parse_assignable_envelope_command(&args),
         "env3dest" => {
-            let name = single_required_arg(&args, "env3dest needs off, res, pitch, or cutoff")?;
+            let name =
+                single_required_arg(&args, "env3dest needs off, res, pitch, cutoff, pw, or amp")?;
             let dest = parse_assignable_dest(name)?;
             Ok(Some(ControlEvent::SetAssignableDest { dest }))
         }
@@ -768,6 +887,7 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             single_optional_arg(&args)?,
             "env3release",
         ),
+        "lfo" => parse_lfo_command(&args),
         "env" => parse_shared_envelope_command(&args),
         "envcopy" => {
             expect_no_args(&args)?;
@@ -783,7 +903,7 @@ fn parse_param_command(line: &str) -> Result<Option<ControlEvent>, String> {
             Ok(Some(ControlEvent::SetEnvVel { amount }))
         }
         other => Err(format!(
-            "unknown command '{other}' (eng, on, off, ch, vol, show, cutoff, res, saw, sq, tri, sin, sub, wave, pw, suboct, amp, fenv, asenv, env, random)"
+            "unknown command '{other}' (eng, on, off, ch, vol, show, cutoff, res, saw, sq, tri, sin, sub, wave, pw, suboct, amp, fenv, asenv, env, lfo, random)"
         )),
     }
 }
@@ -842,7 +962,7 @@ fn parse_assignable_envelope_command(args: &[&str]) -> Result<Option<ControlEven
         }
         Some(field) if field == "dest" => {
             if args.len() < 2 {
-                return Err("asenv dest needs off, res, pitch, or cutoff".to_string());
+                return Err("asenv dest needs off, res, pitch, cutoff, pw, or amp".to_string());
             }
             if args.len() > 2 {
                 return Err("too many arguments".to_string());
@@ -851,6 +971,78 @@ fn parse_assignable_envelope_command(args: &[&str]) -> Result<Option<ControlEven
             Ok(Some(ControlEvent::SetAssignableDest { dest }))
         }
         _ => parse_grouped_envelope(args, EnvelopeId::Assignable, "asenv"),
+    }
+}
+
+fn parse_lfo_id(raw: &str) -> Result<LfoId, String> {
+    match raw {
+        "1" => Ok(LfoId::One),
+        "2" => Ok(LfoId::Two),
+        _ => Err("lfo needs 1 or 2".to_string()),
+    }
+}
+
+fn parse_lfo_wave(name: &str) -> Result<LfoWave, String> {
+    match name.to_ascii_lowercase().as_str() {
+        "sine" => Ok(LfoWave::Sine),
+        "tri" | "triangle" => Ok(LfoWave::Triangle),
+        "square" | "sq" => Ok(LfoWave::Square),
+        "saw" => Ok(LfoWave::Saw),
+        "sh" | "snh" => Ok(LfoWave::SampleHold),
+        other => Err(format!(
+            "unknown wave '{other}' (use sine, tri, square, saw, or sh)"
+        )),
+    }
+}
+
+fn parse_lfo_command(args: &[&str]) -> Result<Option<ControlEvent>, String> {
+    if args.len() < 3 {
+        return Err("lfo needs 1 or 2, then dest, amt, rate, wave, or retrig".to_string());
+    }
+    let which = parse_lfo_id(args[0])?;
+    match args[1].to_ascii_lowercase().as_str() {
+        "dest" => {
+            if args.len() > 3 {
+                return Err("too many arguments".to_string());
+            }
+            let dest = parse_assignable_dest(args[2])?;
+            Ok(Some(ControlEvent::SetLfoDest { which, dest }))
+        }
+        "amt" => {
+            if args.len() > 3 {
+                return Err("too many arguments".to_string());
+            }
+            let amount = args[2]
+                .parse::<f32>()
+                .map_err(|_| format!("could not parse '{}' as a number for lfo amt", args[2]))?;
+            Ok(Some(ControlEvent::SetLfoAmount { which, amount }))
+        }
+        "rate" => {
+            if args.len() > 3 {
+                return Err("too many arguments".to_string());
+            }
+            let rate_hz = args[2]
+                .parse::<f32>()
+                .map_err(|_| format!("could not parse '{}' as a number for lfo rate", args[2]))?;
+            Ok(Some(ControlEvent::SetLfoRate { which, rate_hz }))
+        }
+        "wave" => {
+            if args.len() > 3 {
+                return Err("too many arguments".to_string());
+            }
+            let wave = parse_lfo_wave(args[2])?;
+            Ok(Some(ControlEvent::SetLfoWave { which, wave }))
+        }
+        "retrig" => {
+            if args.len() > 3 {
+                return Err("too many arguments".to_string());
+            }
+            let on = parse_on_off(args[2], "lfo retrig")?;
+            Ok(Some(ControlEvent::SetLfoRetrig { which, on }))
+        }
+        other => Err(format!(
+            "unknown lfo field '{other}' (use dest, amt, rate, wave, or retrig)"
+        )),
     }
 }
 
@@ -889,8 +1081,10 @@ fn parse_assignable_dest(name: &str) -> Result<AssignableDest, String> {
         "res" | "resonance" => Ok(AssignableDest::Resonance),
         "pitch" => Ok(AssignableDest::Pitch),
         "cutoff" => Ok(AssignableDest::Cutoff),
+        "pw" | "pulse" | "pwm" => Ok(AssignableDest::PulseWidth),
+        "amp" => Ok(AssignableDest::Amp),
         other => Err(format!(
-            "unknown dest '{other}' (use off, res, pitch, or cutoff)"
+            "unknown dest '{other}' (use off, res, pitch, cutoff, pw, or amp)"
         )),
     }
 }
@@ -1197,6 +1391,30 @@ mod tests {
             }) => {}
             other => panic!("unexpected {other:?}"),
         }
+        match parse_param_command("asenv dest pw").unwrap() {
+            Some(ControlEvent::SetAssignableDest {
+                dest: AssignableDest::PulseWidth,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("asenv dest pulse").unwrap() {
+            Some(ControlEvent::SetAssignableDest {
+                dest: AssignableDest::PulseWidth,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("asenv dest pwm").unwrap() {
+            Some(ControlEvent::SetAssignableDest {
+                dest: AssignableDest::PulseWidth,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("asenv dest amp").unwrap() {
+            Some(ControlEvent::SetAssignableDest {
+                dest: AssignableDest::Amp,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
         match parse_param_command("asenv amt -1.25").unwrap() {
             Some(ControlEvent::SetAssignableAmount { amount }) => {
                 assert!((amount + 1.25).abs() < f32::EPSILON)
@@ -1207,7 +1425,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_env3dest() {
-        let err = parse_param_command("env3dest pwm").unwrap_err();
+        let err = parse_param_command("env3dest foo").unwrap_err();
         assert!(err.contains("unknown dest"));
     }
 
@@ -1280,6 +1498,8 @@ mod tests {
         assert!(report.contains("suboct "));
         assert!(report.contains("cutoff "));
         assert!(report.contains("env link "));
+        assert!(report.contains("lfo 1 "));
+        assert!(report.contains("lfo 2 "));
         assert!(report.ends_with('\n'));
         assert!(!patch.events.is_empty());
     }
@@ -1293,6 +1513,7 @@ mod tests {
             let mut saw_link_off = false;
             let mut extra_env_times = 0usize;
             let mut env3_dest = AssignableDest::Off;
+            let mut lfo_dests = [AssignableDest::Off; 2];
             let mut saw_volume = false;
 
             let mut saw_osc_levels = 0usize;
@@ -1358,6 +1579,18 @@ mod tests {
                                                 && *amount <= RANDOM_RES_AMT_MAX
                                         );
                                     }
+                                    AssignableDest::PulseWidth => {
+                                        assert!(
+                                            *amount >= RANDOM_PW_AMT_MIN
+                                                && *amount <= RANDOM_PW_AMT_MAX
+                                        );
+                                    }
+                                    AssignableDest::Amp => {
+                                        assert!(
+                                            *amount >= RANDOM_AMP_AMT_MIN
+                                                && *amount <= RANDOM_AMP_AMT_MAX
+                                        );
+                                    }
                                     AssignableDest::Off
                                     | AssignableDest::Pitch
                                     | AssignableDest::Cutoff => {
@@ -1396,6 +1629,47 @@ mod tests {
                                     );
                                     saw_osc_levels += 1;
                                 }
+                                ControlEvent::SetLfoDest { which, dest } => {
+                                    lfo_dests[which.index()] = *dest;
+                                }
+                                ControlEvent::SetLfoAmount { which, amount } => {
+                                    match lfo_dests[which.index()] {
+                                        AssignableDest::Resonance => {
+                                            assert!(
+                                                *amount >= RANDOM_RES_AMT_MIN
+                                                    && *amount <= RANDOM_RES_AMT_MAX
+                                            );
+                                        }
+                                        AssignableDest::PulseWidth => {
+                                            assert!(
+                                                *amount >= RANDOM_PW_AMT_MIN
+                                                    && *amount <= RANDOM_PW_AMT_MAX
+                                            );
+                                        }
+                                        AssignableDest::Amp => {
+                                            assert!(
+                                                *amount >= RANDOM_AMP_AMT_MIN
+                                                    && *amount <= RANDOM_AMP_AMT_MAX
+                                            );
+                                        }
+                                        AssignableDest::Off
+                                        | AssignableDest::Pitch
+                                        | AssignableDest::Cutoff => {
+                                            assert!(
+                                                *amount >= RANDOM_AMT_MIN
+                                                    && *amount <= RANDOM_AMT_MAX
+                                            );
+                                        }
+                                    }
+                                }
+                                ControlEvent::SetLfoRate { rate_hz, .. } => {
+                                    assert!(
+                                        *rate_hz >= LFO_RATE_MIN_HZ && *rate_hz <= LFO_RATE_MAX_HZ,
+                                        "seed {seed}: LFO rate {rate_hz} out of range"
+                                    );
+                                }
+                                ControlEvent::SetLfoWave { .. }
+                                | ControlEvent::SetLfoRetrig { .. } => {}
                                 ControlEvent::SetWave { .. }
                                 | ControlEvent::NoteOn { .. }
                                 | ControlEvent::NoteOff { .. }
@@ -1422,6 +1696,8 @@ mod tests {
             assert!(report.contains("sq "));
             assert!(report.contains("sub "));
             assert!(report.contains("suboct "));
+            assert!(report.contains("lfo 1 "));
+            assert!(report.contains("lfo 2 "));
             assert!(
                 saw_link_on ^ saw_link_off,
                 "seed {seed}: expected exactly one envlink setting"
@@ -1449,12 +1725,10 @@ mod tests {
             .expect("command");
         assert!(parsed.switch_current.is_none());
         match parsed.events.as_slice() {
-            [
-                MixerEvent::ToInstance {
-                    instance: 2,
-                    event: InstanceEvent::Engine(ControlEvent::SetCutoff { hz }),
-                },
-            ] => assert!((*hz - 800.0).abs() < f32::EPSILON),
+            [MixerEvent::ToInstance {
+                instance: 2,
+                event: InstanceEvent::Engine(ControlEvent::SetCutoff { hz }),
+            }] => assert!((*hz - 800.0).abs() < f32::EPSILON),
             other => panic!("unexpected {other:?}"),
         }
         apply_parsed(&mut session, &parsed);
@@ -1499,6 +1773,119 @@ mod tests {
         assert!(!report.contains("eng 2 on"));
         assert!(!report.contains("eng 2 off"));
         assert!(!report.contains("eng 2 ch "));
+    }
+
+    #[test]
+    fn parses_lfo_commands_and_aliases() {
+        match parse_param_command("lfo 1 dest pitch").unwrap() {
+            Some(ControlEvent::SetLfoDest {
+                which: LfoId::One,
+                dest: AssignableDest::Pitch,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("lfo 2 dest pw").unwrap() {
+            Some(ControlEvent::SetLfoDest {
+                which: LfoId::Two,
+                dest: AssignableDest::PulseWidth,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("lfo 1 amt -0.25").unwrap() {
+            Some(ControlEvent::SetLfoAmount {
+                which: LfoId::One,
+                amount,
+            }) => assert!((amount + 0.25).abs() < f32::EPSILON),
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("lfo 2 rate 4").unwrap() {
+            Some(ControlEvent::SetLfoRate {
+                which: LfoId::Two,
+                rate_hz,
+            }) => assert!((rate_hz - 4.0).abs() < f32::EPSILON),
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("lfo 1 wave triangle").unwrap() {
+            Some(ControlEvent::SetLfoWave {
+                which: LfoId::One,
+                wave: LfoWave::Triangle,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("lfo 1 wave sq").unwrap() {
+            Some(ControlEvent::SetLfoWave {
+                which: LfoId::One,
+                wave: LfoWave::Square,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("lfo 2 wave snh").unwrap() {
+            Some(ControlEvent::SetLfoWave {
+                which: LfoId::Two,
+                wave: LfoWave::SampleHold,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("lfo 1 retrig off").unwrap() {
+            Some(ControlEvent::SetLfoRetrig {
+                which: LfoId::One,
+                on: false,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_param_command("lfo 2 retrig on").unwrap() {
+            Some(ControlEvent::SetLfoRetrig {
+                which: LfoId::Two,
+                on: true,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn glued_lfo1_errors() {
+        match parse_line_commands("lfo1 dest pitch", 1) {
+            Err(err) => assert!(err.contains("lfo N")),
+            Ok(_) => panic!("glued lfo1 should error"),
+        }
+        assert!(parse_line_commands("lfo1", 1).is_err());
+        assert!(parse_line_commands("eng 2 lfo1 rate 4", 1).is_err());
+    }
+
+    #[test]
+    fn show_includes_lfo_lines() {
+        let session = CommandSession::new();
+        let shown = format_show(&session, 1);
+        assert!(shown.contains("lfo 1 dest off"));
+        assert!(shown.contains("lfo 1 amt 0.00"));
+        assert!(shown.contains("lfo 1 rate 1.00"));
+        assert!(shown.contains("lfo 1 wave sine"));
+        assert!(shown.contains("lfo 1 retrig on"));
+        assert!(shown.contains("lfo 2 dest off"));
+        assert!(shown.contains("lfo 2 retrig on"));
+    }
+
+    #[test]
+    fn eng_2_lfo_1_rate_is_oneshot() {
+        let mut session = CommandSession::new();
+        let parsed = parse_line_commands("eng 2 lfo 1 rate 4", session.current_instance)
+            .unwrap()
+            .expect("command");
+        assert!(parsed.switch_current.is_none());
+        match parsed.events.as_slice() {
+            [MixerEvent::ToInstance {
+                instance: 2,
+                event:
+                    InstanceEvent::Engine(ControlEvent::SetLfoRate {
+                        which: LfoId::One,
+                        rate_hz,
+                    }),
+            }] => assert!((*rate_hz - 4.0).abs() < f32::EPSILON),
+            other => panic!("unexpected {other:?}"),
+        }
+        apply_parsed(&mut session, &parsed);
+        assert_eq!(session.current_instance, 1);
+        assert!((session.shadows[1].params.lfos[0].rate_hz - 4.0).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -2,12 +2,14 @@
 
 mod envelope;
 mod filter;
+mod lfo;
 mod mixer;
 mod oscillator;
 mod voices;
 
 pub use envelope::{Adsr, AdsrTimes, EnvelopeStage, velocity_to_amp};
 pub use filter::Svf;
+pub use lfo::{LFO_RATE_DEFAULT_HZ, LFO_RATE_MAX_HZ, LFO_RATE_MIN_HZ, LfoId, LfoParams, LfoWave};
 pub use mixer::{ENGINE_COUNT, InstanceEvent, Mixer, MixerEvent};
 pub use oscillator::{Oscillator, PULSE_WIDTH_DEFAULT, PULSE_WIDTH_MAX, PULSE_WIDTH_MIN, Waveform};
 
@@ -19,13 +21,15 @@ pub const VOICE_COUNT: usize = 4;
 const AMT_MIN: f32 = -8.0;
 const AMT_MAX: f32 = 8.0;
 
-/// Destination for the assignable envelope. More destinations can be added later.
+/// Destination for an assignable envelope or LFO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignableDest {
     Off,
     Resonance,
     Pitch,
     Cutoff,
+    PulseWidth,
+    Amp,
 }
 
 /// How many octaves below the sounding pitch the sub oscillator sits.
@@ -121,6 +125,26 @@ pub enum ControlEvent {
     SetAssignableAmount {
         amount: f32,
     },
+    SetLfoDest {
+        which: LfoId,
+        dest: AssignableDest,
+    },
+    SetLfoAmount {
+        which: LfoId,
+        amount: f32,
+    },
+    SetLfoRate {
+        which: LfoId,
+        rate_hz: f32,
+    },
+    SetLfoWave {
+        which: LfoId,
+        wave: LfoWave,
+    },
+    SetLfoRetrig {
+        which: LfoId,
+        on: bool,
+    },
     EnvCopy,
     SetEnvLink {
         on: bool,
@@ -190,6 +214,7 @@ pub struct EngineParams {
     pub env_vel: f32,
     pub sub_vol: f32,
     pub sub_octaves: SubOctaves,
+    pub lfos: [LfoParams; 2],
 }
 
 impl Default for EngineParams {
@@ -212,6 +237,7 @@ impl Default for EngineParams {
             env_vel: 0.0,
             sub_vol: 0.0,
             sub_octaves: SubOctaves::One,
+            lfos: [LfoParams::default(); 2],
         }
     }
 }
@@ -302,6 +328,26 @@ impl EngineParams {
             }
             ControlEvent::SetAssignableAmount { amount } => {
                 self.assignable_amount = amount.clamp(AMT_MIN, AMT_MAX);
+                ParamEffects::NONE
+            }
+            ControlEvent::SetLfoDest { which, dest } => {
+                self.lfos[which.index()].dest = dest;
+                ParamEffects::NONE
+            }
+            ControlEvent::SetLfoAmount { which, amount } => {
+                self.lfos[which.index()].amount = amount.clamp(AMT_MIN, AMT_MAX);
+                ParamEffects::NONE
+            }
+            ControlEvent::SetLfoRate { which, rate_hz } => {
+                self.lfos[which.index()].rate_hz = rate_hz.clamp(LFO_RATE_MIN_HZ, LFO_RATE_MAX_HZ);
+                ParamEffects::NONE
+            }
+            ControlEvent::SetLfoWave { which, wave } => {
+                self.lfos[which.index()].wave = wave;
+                ParamEffects::NONE
+            }
+            ControlEvent::SetLfoRetrig { which, on } => {
+                self.lfos[which.index()].retrigger = on;
                 ParamEffects::NONE
             }
             ControlEvent::EnvCopy => {
@@ -540,6 +586,34 @@ mod tests {
 
     fn set_sine_vol(engine: &mut Engine, amount: f32) {
         engine.apply(ControlEvent::SetSineVol { amount });
+    }
+
+    fn set_lfo_dest(engine: &mut Engine, which: LfoId, dest: AssignableDest) {
+        engine.apply(ControlEvent::SetLfoDest { which, dest });
+    }
+
+    fn set_lfo_amount(engine: &mut Engine, which: LfoId, amount: f32) {
+        engine.apply(ControlEvent::SetLfoAmount { which, amount });
+    }
+
+    fn set_lfo_rate(engine: &mut Engine, which: LfoId, rate_hz: f32) {
+        engine.apply(ControlEvent::SetLfoRate { which, rate_hz });
+    }
+
+    fn set_lfo_wave(engine: &mut Engine, which: LfoId, wave: LfoWave) {
+        engine.apply(ControlEvent::SetLfoWave { which, wave });
+    }
+
+    fn set_lfo_retrig(engine: &mut Engine, which: LfoId, on: bool) {
+        engine.apply(ControlEvent::SetLfoRetrig { which, on });
+    }
+
+    fn set_square_lfo_one(engine: &mut Engine, dest: AssignableDest, amount: f32) {
+        set_lfo_dest(engine, LfoId::One, dest);
+        set_lfo_amount(engine, LfoId::One, amount);
+        set_lfo_rate(engine, LfoId::One, 1.0);
+        set_lfo_wave(engine, LfoId::One, LfoWave::Square);
+        set_lfo_retrig(engine, LfoId::One, true);
     }
 
     #[test]
@@ -975,6 +1049,143 @@ mod tests {
         assert!(
             at_octave > at_base,
             "octave should dominate original pitch; base={at_base} octave={at_octave}"
+        );
+    }
+
+    #[test]
+    fn assignable_dest_pulse_width_at_sustain_changes_harmonic_energy() {
+        let mut off = Engine::new(SAMPLE_RATE_HZ);
+        let mut pwm = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut off, &mut pwm] {
+            set_wave(engine, Waveform::Square);
+            set_pulse(engine, 0.5);
+            set_fast_amp_sustain(engine);
+            set_fast_assignable_env_sustain(engine);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
+        }
+        off.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Off,
+        });
+        pwm.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::PulseWidth,
+        });
+        pwm.apply(ControlEvent::SetAssignableAmount { amount: -0.4 });
+
+        note_on(&mut off, 48, 127);
+        note_on(&mut pwm, 48, 127);
+        for _ in 0..2_000 {
+            off.next_sample();
+            pwm.next_sample();
+        }
+        let off_samples = take_samples(&mut off, ANALYSIS_SAMPLES);
+        let pwm_samples = take_samples(&mut pwm, ANALYSIS_SAMPLES);
+        let h2 = midi_note_to_hz(48) * 2.0;
+        let off_h2 = tone_strength(&off_samples, h2);
+        let pwm_h2 = tone_strength(&pwm_samples, h2);
+        assert!(
+            pwm_h2 > off_h2 * 2.0,
+            "dest pw at sustain should raise 2nd harmonic vs dest off; off={off_h2} pwm={pwm_h2}"
+        );
+    }
+
+    #[test]
+    fn assignable_dest_amp_at_sustain_changes_peak() {
+        let mut off = Engine::new(SAMPLE_RATE_HZ);
+        let mut boosted = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut off, &mut boosted] {
+            set_wave(engine, Waveform::Saw);
+            set_fast_amp_sustain(engine);
+            set_fast_assignable_env_sustain(engine);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
+        }
+        off.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Off,
+        });
+        off.apply(ControlEvent::SetAssignableAmount { amount: 0.0 });
+        boosted.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Amp,
+        });
+        boosted.apply(ControlEvent::SetAssignableAmount { amount: 0.8 });
+
+        note_on(&mut off, 60, 127);
+        note_on(&mut boosted, 60, 127);
+        for _ in 0..2_000 {
+            off.next_sample();
+            boosted.next_sample();
+        }
+        let peak_off = peak_abs(&take_samples(&mut off, ANALYSIS_SAMPLES));
+        let peak_boosted = peak_abs(&take_samples(&mut boosted, ANALYSIS_SAMPLES));
+        assert!(
+            peak_boosted > peak_off * 1.4,
+            "dest amp at sustain should raise peak vs dest off; off={peak_off} boosted={peak_boosted}"
+        );
+    }
+
+    #[test]
+    fn dest_off_and_wave_do_not_change_loudness_through_amp_path() {
+        let mut dest_off_zero = Engine::new(SAMPLE_RATE_HZ);
+        let mut dest_off_large = Engine::new(SAMPLE_RATE_HZ);
+        let mut wave_only = Engine::new(SAMPLE_RATE_HZ);
+        let mut dest_amp_zero = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [
+            &mut dest_off_zero,
+            &mut dest_off_large,
+            &mut wave_only,
+            &mut dest_amp_zero,
+        ] {
+            set_fast_amp_sustain(engine);
+            set_fast_assignable_env_sustain(engine);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
+        }
+        set_wave(&mut dest_off_zero, Waveform::Saw);
+        dest_off_zero.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Off,
+        });
+        dest_off_zero.apply(ControlEvent::SetAssignableAmount { amount: 0.0 });
+
+        set_wave(&mut dest_off_large, Waveform::Saw);
+        dest_off_large.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Off,
+        });
+        dest_off_large.apply(ControlEvent::SetAssignableAmount { amount: 8.0 });
+
+        set_wave(&mut wave_only, Waveform::Saw);
+
+        set_wave(&mut dest_amp_zero, Waveform::Saw);
+        dest_amp_zero.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Amp,
+        });
+        dest_amp_zero.apply(ControlEvent::SetAssignableAmount { amount: 0.0 });
+
+        note_on(&mut dest_off_zero, 60, 127);
+        note_on(&mut dest_off_large, 60, 127);
+        note_on(&mut wave_only, 60, 127);
+        note_on(&mut dest_amp_zero, 60, 127);
+        for _ in 0..2_000 {
+            dest_off_zero.next_sample();
+            dest_off_large.next_sample();
+            wave_only.next_sample();
+            dest_amp_zero.next_sample();
+        }
+        let peak_zero = peak_abs(&take_samples(&mut dest_off_zero, ANALYSIS_SAMPLES));
+        let peak_large = peak_abs(&take_samples(&mut dest_off_large, ANALYSIS_SAMPLES));
+        let peak_wave = peak_abs(&take_samples(&mut wave_only, ANALYSIS_SAMPLES));
+        let peak_amp_zero = peak_abs(&take_samples(&mut dest_amp_zero, ANALYSIS_SAMPLES));
+        let denom = peak_zero.max(1e-6);
+        assert!(
+            (peak_large - peak_zero).abs() / denom < 0.05,
+            "dest off with large amount must not use the amp path; zero={peak_zero} large={peak_large}"
+        );
+        assert!(
+            (peak_wave - peak_zero).abs() / denom < 0.05,
+            "wave preset must not change loudness through the amp path; zero={peak_zero} wave={peak_wave}"
+        );
+        assert!(
+            (peak_amp_zero - peak_zero).abs() / denom < 0.05,
+            "dest amp amount 0 must match dest off; zero={peak_zero} amp0={peak_amp_zero}"
         );
     }
 
@@ -1419,5 +1630,276 @@ mod tests {
             None
         );
         assert_eq!(params.apply(ControlEvent::NoteOff { note: 60 }), None);
+    }
+
+    #[test]
+    fn lfo_defaults_and_rate_amount_clamp() {
+        let params = EngineParams::default();
+        for lfo in params.lfos {
+            assert_eq!(lfo.dest, AssignableDest::Off);
+            assert!((lfo.amount - 0.0).abs() < f32::EPSILON);
+            assert!((lfo.rate_hz - LFO_RATE_DEFAULT_HZ).abs() < f32::EPSILON);
+            assert_eq!(lfo.wave, LfoWave::Sine);
+            assert!(lfo.retrigger);
+        }
+
+        let mut params = EngineParams::default();
+        params
+            .apply(ControlEvent::SetLfoRate {
+                which: LfoId::One,
+                rate_hz: 0.0,
+            })
+            .expect("parameter event");
+        assert!((params.lfos[0].rate_hz - LFO_RATE_MIN_HZ).abs() < f32::EPSILON);
+        params
+            .apply(ControlEvent::SetLfoRate {
+                which: LfoId::Two,
+                rate_hz: 100.0,
+            })
+            .expect("parameter event");
+        assert!((params.lfos[1].rate_hz - LFO_RATE_MAX_HZ).abs() < f32::EPSILON);
+        params
+            .apply(ControlEvent::SetLfoAmount {
+                which: LfoId::One,
+                amount: -20.0,
+            })
+            .expect("parameter event");
+        assert!((params.lfos[0].amount - AMT_MIN).abs() < f32::EPSILON);
+        params
+            .apply(ControlEvent::SetLfoAmount {
+                which: LfoId::One,
+                amount: 20.0,
+            })
+            .expect("parameter event");
+        assert!((params.lfos[0].amount - AMT_MAX).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn square_lfo_pitch_sits_at_plus_one_octave() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_wave(&mut engine, Waveform::Saw);
+        set_cutoff(&mut engine, 10_000.0);
+        set_res(&mut engine, 0.0);
+        set_fast_amp_sustain(&mut engine);
+        set_square_lfo_one(&mut engine, AssignableDest::Pitch, 1.0);
+
+        let note = 57u8;
+        note_on(&mut engine, note, 127);
+        for _ in 0..2_000 {
+            engine.next_sample();
+        }
+        let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
+        let base_hz = midi_note_to_hz(note);
+        let shifted_hz = base_hz * 2.0;
+        let at_base = tone_strength(&samples, base_hz);
+        let at_octave = tone_strength(&samples, shifted_hz);
+        assert!(
+            at_octave > TONE_PRESENT,
+            "square LFO dest pitch amt 1 should sit near +1 octave ({shifted_hz} Hz), got {at_octave}"
+        );
+        assert!(
+            at_octave > at_base,
+            "octave should dominate original pitch; base={at_base} octave={at_octave}"
+        );
+    }
+
+    #[test]
+    fn square_lfo_cutoff_opens_vs_amount_zero() {
+        let mut closed = Engine::new(SAMPLE_RATE_HZ);
+        let mut opened = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut closed, &mut opened] {
+            set_wave(engine, Waveform::Square);
+            set_cutoff(engine, 400.0);
+            set_res(engine, 0.0);
+            set_fast_amp_sustain(engine);
+        }
+        set_square_lfo_one(&mut closed, AssignableDest::Cutoff, 0.0);
+        set_square_lfo_one(&mut opened, AssignableDest::Cutoff, 4.0);
+
+        note_on(&mut closed, 57, 127);
+        note_on(&mut opened, 57, 127);
+        for _ in 0..2_000 {
+            closed.next_sample();
+            opened.next_sample();
+        }
+        let closed_samples = take_samples(&mut closed, ANALYSIS_SAMPLES);
+        let opened_samples = take_samples(&mut opened, ANALYSIS_SAMPLES);
+        let harmonic_hz = midi_note_to_hz(57) * 5.0;
+        let closed_h = tone_strength(&closed_samples, harmonic_hz);
+        let opened_h = tone_strength(&opened_samples, harmonic_hz);
+        assert!(
+            opened_h > closed_h * 1.5,
+            "square LFO dest cutoff should pass more 5th harmonic; closed={closed_h} opened={opened_h}"
+        );
+    }
+
+    #[test]
+    fn lfo_dest_off_with_large_amount_does_not_shift_pitch() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_wave(&mut engine, Waveform::Saw);
+        set_cutoff(&mut engine, 10_000.0);
+        set_res(&mut engine, 0.0);
+        set_fast_amp_sustain(&mut engine);
+        set_square_lfo_one(&mut engine, AssignableDest::Off, 8.0);
+
+        let note = 57u8;
+        note_on(&mut engine, note, 127);
+        for _ in 0..2_000 {
+            engine.next_sample();
+        }
+        let samples = take_samples(&mut engine, ANALYSIS_SAMPLES);
+        let base_hz = midi_note_to_hz(note);
+        let octave_hz = base_hz * 2.0;
+        let at_base = tone_strength(&samples, base_hz);
+        let at_octave = tone_strength(&samples, octave_hz);
+        assert!(
+            at_base > TONE_PRESENT,
+            "dest off must keep the original pitch; got {at_base}"
+        );
+        assert!(
+            at_base > at_octave,
+            "dest off with large amount must not shift an octave; base={at_base} octave={at_octave}"
+        );
+    }
+
+    #[test]
+    fn square_lfo_dest_amp_changes_peak() {
+        let mut off = Engine::new(SAMPLE_RATE_HZ);
+        let mut boosted = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut off, &mut boosted] {
+            set_wave(engine, Waveform::Saw);
+            set_fast_amp_sustain(engine);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
+        }
+        set_square_lfo_one(&mut off, AssignableDest::Off, 0.0);
+        set_square_lfo_one(&mut boosted, AssignableDest::Amp, 0.8);
+
+        note_on(&mut off, 60, 127);
+        note_on(&mut boosted, 60, 127);
+        for _ in 0..2_000 {
+            off.next_sample();
+            boosted.next_sample();
+        }
+        let peak_off = peak_abs(&take_samples(&mut off, ANALYSIS_SAMPLES));
+        let peak_boosted = peak_abs(&take_samples(&mut boosted, ANALYSIS_SAMPLES));
+        assert!(
+            peak_boosted > peak_off * 1.4,
+            "square LFO dest amp should raise peak vs dest off; off={peak_off} boosted={peak_boosted}"
+        );
+    }
+
+    #[test]
+    fn square_lfo_dest_pulse_width_changes_harmonic_energy() {
+        let mut off = Engine::new(SAMPLE_RATE_HZ);
+        let mut pwm = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut off, &mut pwm] {
+            set_wave(engine, Waveform::Square);
+            set_pulse(engine, 0.5);
+            set_fast_amp_sustain(engine);
+            set_cutoff(engine, 10_000.0);
+            set_res(engine, 0.0);
+        }
+        set_square_lfo_one(&mut off, AssignableDest::Off, 0.0);
+        set_square_lfo_one(&mut pwm, AssignableDest::PulseWidth, -0.4);
+
+        note_on(&mut off, 48, 127);
+        note_on(&mut pwm, 48, 127);
+        for _ in 0..2_000 {
+            off.next_sample();
+            pwm.next_sample();
+        }
+        let off_samples = take_samples(&mut off, ANALYSIS_SAMPLES);
+        let pwm_samples = take_samples(&mut pwm, ANALYSIS_SAMPLES);
+        let h2 = midi_note_to_hz(48) * 2.0;
+        let off_h2 = tone_strength(&off_samples, h2);
+        let pwm_h2 = tone_strength(&pwm_samples, h2);
+        assert!(
+            pwm_h2 > off_h2 * 2.0,
+            "square LFO dest pw should raise 2nd harmonic vs dest off; off={off_h2} pwm={pwm_h2}"
+        );
+    }
+
+    #[test]
+    fn assignable_env_plus_lfo_cutoff_matches_summed_amount() {
+        let mut stacked = Engine::new(SAMPLE_RATE_HZ);
+        let mut combined = Engine::new(SAMPLE_RATE_HZ);
+        for engine in [&mut stacked, &mut combined] {
+            set_wave(engine, Waveform::Square);
+            set_cutoff(engine, 400.0);
+            set_res(engine, 0.0);
+            set_fast_amp_sustain(engine);
+            set_fast_assignable_env_sustain(engine);
+        }
+        stacked.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Cutoff,
+        });
+        stacked.apply(ControlEvent::SetAssignableAmount { amount: 2.0 });
+        set_square_lfo_one(&mut stacked, AssignableDest::Cutoff, 2.0);
+
+        combined.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Cutoff,
+        });
+        combined.apply(ControlEvent::SetAssignableAmount { amount: 4.0 });
+        set_square_lfo_one(&mut combined, AssignableDest::Off, 0.0);
+
+        note_on(&mut stacked, 57, 127);
+        note_on(&mut combined, 57, 127);
+        for _ in 0..2_000 {
+            stacked.next_sample();
+            combined.next_sample();
+        }
+        let stacked_samples = take_samples(&mut stacked, ANALYSIS_SAMPLES);
+        let combined_samples = take_samples(&mut combined, ANALYSIS_SAMPLES);
+        let harmonic_hz = midi_note_to_hz(57) * 5.0;
+        let stacked_h = tone_strength(&stacked_samples, harmonic_hz);
+        let combined_h = tone_strength(&combined_samples, harmonic_hz);
+        let denom = stacked_h.max(combined_h).max(1e-6);
+        assert!(
+            (stacked_h - combined_h).abs() / denom < 0.2,
+            "asenv 2 + LFO 2 octaves should match asenv 4; stacked={stacked_h} combined={combined_h}"
+        );
+    }
+
+    #[test]
+    fn square_lfo_pitch_retrig_starts_each_note_at_plus_octave() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_wave(&mut engine, Waveform::Saw);
+        set_cutoff(&mut engine, 10_000.0);
+        set_res(&mut engine, 0.0);
+        set_fast_amp_sustain(&mut engine);
+        set_square_lfo_one(&mut engine, AssignableDest::Pitch, 1.0);
+
+        let note = 57u8;
+        let base_hz = midi_note_to_hz(note);
+        let octave_hz = base_hz * 2.0;
+
+        note_on(&mut engine, note, 127);
+        for _ in 0..500 {
+            engine.next_sample();
+        }
+        let first = take_samples(&mut engine, 1_024);
+        note_off(&mut engine, note);
+        for _ in 0..20_000 {
+            engine.next_sample();
+        }
+        note_on(&mut engine, note, 127);
+        for _ in 0..500 {
+            engine.next_sample();
+        }
+        let second = take_samples(&mut engine, 1_024);
+
+        for (label, samples) in [("first", first.as_slice()), ("second", second.as_slice())] {
+            let at_octave = tone_strength(samples, octave_hz);
+            let at_base = tone_strength(samples, base_hz);
+            assert!(
+                at_octave > TONE_PRESENT,
+                "{label} note should start at +1 octave; got {at_octave}"
+            );
+            assert!(
+                at_octave > at_base,
+                "{label} note octave should dominate; base={at_base} octave={at_octave}"
+            );
+        }
     }
 }

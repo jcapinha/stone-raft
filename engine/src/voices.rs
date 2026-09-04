@@ -2,8 +2,31 @@
 
 use crate::envelope::velocity_to_amp;
 use crate::filter::Svf;
-use crate::oscillator::{Oscillator, Waveform};
+use crate::lfo::Lfo;
+use crate::oscillator::{Oscillator, PULSE_WIDTH_MAX, PULSE_WIDTH_MIN, Waveform};
 use crate::{AssignableDest, EngineParams, VOICE_COUNT, hz_times_octaves, midi_note_to_hz};
+
+#[derive(Clone, Copy, Default)]
+struct ModOffsets {
+    cutoff_octaves: f32,
+    resonance: f32,
+    pitch_octaves: f32,
+    pulse_width: f32,
+    amp: f32,
+}
+
+/// Adds `level * amount` to one dest. Envelope and LFO sources both use this.
+fn add_assignable(offsets: &mut ModOffsets, dest: AssignableDest, level: f32, amount: f32) {
+    let delta = level * amount;
+    match dest {
+        AssignableDest::Off => {}
+        AssignableDest::Resonance => offsets.resonance += delta,
+        AssignableDest::Pitch => offsets.pitch_octaves += delta,
+        AssignableDest::Cutoff => offsets.cutoff_octaves += delta,
+        AssignableDest::PulseWidth => offsets.pulse_width += delta,
+        AssignableDest::Amp => offsets.amp += delta,
+    }
+}
 
 /// Conservative per-voice gain so a few bright voices stay near full scale.
 const VOICE_AMPLITUDE: f32 = 0.12;
@@ -26,6 +49,7 @@ struct Voice {
     amp: crate::Adsr,
     filter_env: crate::Adsr,
     assignable_env: crate::Adsr,
+    lfos: [Lfo; 2],
     note: u8,
     velocity_amp: f32,
     base_hz: f32,
@@ -34,7 +58,7 @@ struct Voice {
 }
 
 impl Voice {
-    fn new(sample_rate_hz: f32) -> Self {
+    fn new(sample_rate_hz: f32, voice_index: usize) -> Self {
         Self {
             saw: Oscillator::new(sample_rate_hz, 440.0, Waveform::Saw),
             square: Oscillator::new(sample_rate_hz, 440.0, Waveform::Square),
@@ -45,6 +69,9 @@ impl Voice {
             amp: crate::Adsr::new(sample_rate_hz),
             filter_env: crate::Adsr::new(sample_rate_hz),
             assignable_env: crate::Adsr::new(sample_rate_hz),
+            lfos: core::array::from_fn(|lfo_index| {
+                Lfo::new(sample_rate_hz, voice_index, lfo_index)
+            }),
             note: 0,
             velocity_amp: 1.0,
             base_hz: 440.0,
@@ -88,6 +115,11 @@ impl Voice {
         self.amp.note_on();
         self.filter_env.note_on();
         self.assignable_env.note_on();
+        for (index, lfo) in self.lfos.iter_mut().enumerate() {
+            if params.lfos[index].retrigger {
+                lfo.retrigger();
+            }
+        }
         self.note = note;
         self.velocity_amp = velocity_to_amp(velocity);
         self.base_hz = base_hz;
@@ -119,23 +151,28 @@ impl Voice {
         let assign_amount =
             effective_envelope_amount(params.assignable_amount, params.env_vel, velocity);
 
-        let (assign_cutoff_octaves, resonance, oscillator_hz) = match params.assignable_dest {
-            AssignableDest::Off => (0.0, params.resonance, self.base_hz),
-            AssignableDest::Resonance => (
-                0.0,
-                params.resonance + assign_level * assign_amount,
-                self.base_hz,
-            ),
-            AssignableDest::Pitch => {
-                let hz = hz_times_octaves(self.base_hz, assign_level * assign_amount);
-                let hz = hz.clamp(20.0, sample_rate_hz * 0.25);
-                (0.0, params.resonance, hz)
+        let mut offsets = ModOffsets::default();
+        add_assignable(
+            &mut offsets,
+            params.assignable_dest,
+            assign_level,
+            assign_amount,
+        );
+        for (index, lfo) in self.lfos.iter_mut().enumerate() {
+            let lfo_params = &params.lfos[index];
+            let level = lfo.next_level(lfo_params.rate_hz, lfo_params.wave);
+            if lfo_params.dest != AssignableDest::Off && lfo_params.amount != 0.0 {
+                add_assignable(&mut offsets, lfo_params.dest, level, lfo_params.amount);
             }
-            AssignableDest::Cutoff => {
-                (assign_level * assign_amount, params.resonance, self.base_hz)
-            }
-        };
-        let cutoff_hz = hz_times_octaves(params.cutoff_hz, filter_octaves + assign_cutoff_octaves);
+        }
+        offsets.cutoff_octaves += filter_octaves;
+
+        let oscillator_hz = hz_times_octaves(self.base_hz, offsets.pitch_octaves)
+            .clamp(20.0, sample_rate_hz * 0.25);
+        let cutoff_hz = hz_times_octaves(params.cutoff_hz, offsets.cutoff_octaves);
+        let resonance = params.resonance + offsets.resonance;
+        let pulse_width =
+            (params.pulse_width + offsets.pulse_width).clamp(PULSE_WIDTH_MIN, PULSE_WIDTH_MAX);
         let levels = AtPitchLevels {
             saw: params.saw_vol,
             square: params.square_vol,
@@ -148,6 +185,7 @@ impl Voice {
         }
         if levels.square > 0.0 {
             self.square.set_frequency(sample_rate_hz, oscillator_hz);
+            self.square.set_pulse_width(pulse_width);
         }
         if levels.triangle > 0.0 {
             self.triangle.set_frequency(sample_rate_hz, oscillator_hz);
@@ -191,7 +229,8 @@ impl Voice {
             .filter
             .process(oscillator, sample_rate_hz, cutoff_hz, resonance);
         let amp = self.amp.next_level();
-        filtered * amp * self.velocity_amp * VOICE_AMPLITUDE
+        let amp_gain = (1.0 + offsets.amp).max(0.0);
+        filtered * amp * self.velocity_amp * VOICE_AMPLITUDE * amp_gain
     }
 }
 
@@ -205,7 +244,7 @@ impl Voices {
     pub(crate) fn new(sample_rate_hz: f32, params: &EngineParams) -> Self {
         let mut voices = Self {
             sample_rate_hz,
-            voices: core::array::from_fn(|_| Voice::new(sample_rate_hz)),
+            voices: core::array::from_fn(|index| Voice::new(sample_rate_hz, index)),
             next_age: 1,
         };
         voices.synchronize_envelopes(params);

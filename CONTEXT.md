@@ -47,11 +47,21 @@ _Avoid_: using “envelope” alone when amp vs filter vs assignable must be dis
 Dedicated ADSR that moves cutoff over each note. Amount is signed octaves. The cutoff knob is the frequency when this envelope’s level is 0.
 
 **Assignable envelope**:
-Third ADSR per voice. Destination is off, resonance, pitch, or cutoff. Terminal commands use the `asenv` prefix. More destinations can be added later.
+Third ADSR per voice. Destination is off, resonance, pitch, cutoff, pulse width, or amp. Terminal commands use the `asenv` prefix.
 _Avoid_: env2, mod envelope
 
+**Assignable destination**:
+Where an assignable envelope or LFO writes. Current dests: off, resonance, pitch, cutoff, pulse width, amp.
+
 **Envelope amount**:
-How far an envelope moves its destination. Filter amount is octaves. Assignable amount is octaves for pitch and cutoff, and linear for resonance.
+How far an envelope moves its destination. Filter amount is octaves. Assignable amount is octaves for pitch and cutoff, and linear for resonance, pulse width, and amp.
+
+**LFO**:
+A slow repeating wave used as a modulator. It keeps moving a destination while notes sound, instead of running once per note like an envelope.
+_Avoid_: using “oscillator” alone for this
+
+**Assignable LFO**:
+One of two LFOs per engine. Settings are per engine. Each voice runs its own pair. Destination uses the assignable destination list.
 
 **Envelope link**:
 When on, `amp` ADSR commands also write filter and assignable envelope times. A `fenv` or `asenv` time command turns link off.
@@ -101,7 +111,7 @@ A Cargo workspace with a shared `engine` crate, shared laptop host plumbing in `
 The engine is written in no_std style (fixed-size data, no heap, minimal dependencies) from day one, so the exact same DSP runs on the laptop and the Daisy. FunDSP may be studied as a reference but is not a dependency.
 
 **Subtractive engine path and roadmap**
-The first engine is subtractive: per-engine oscillator mix (PolyBLEP saw and square with pulse width, PolyBLAMP triangle, pure sine, plus additive sub) into a per-voice state-variable filter (SVF), then a full amp ADSR with exponential-ish segments, then summed. Velocity scales amp with a curved mapping (unit-tested; keyboard still uses fixed velocity). Each voice has three ADSRs: amp, a dedicated filter envelope, and an assignable envelope. Key tracking is later. Planned later on the same recipe: a learning look at Moog-style ladder filters, and a possible reevaluation of heavier band-limited oscillators. Wavetable remains a separate future engine.
+The first engine is subtractive: per-engine oscillator mix (PolyBLEP saw and square with pulse width, PolyBLAMP triangle, pure sine, plus additive sub) into a per-voice state-variable filter (SVF), then a full amp ADSR with exponential-ish segments, then summed. Velocity scales amp with a curved mapping (unit-tested; keyboard still uses fixed velocity). Each voice has three ADSRs: amp, a dedicated filter envelope, and an assignable envelope. Two assignable LFOs share the assignable destination list. Key tracking is later. Planned later on the same recipe: a learning look at Moog-style ladder filters, and a possible reevaluation of heavier band-limited oscillators. Wavetable remains a separate future engine.
 
 **Per-engine oscillator mix**
 Five sources per engine: saw, square, triangle, and sine at pitch (levels normalize as weights), plus sub (additive via `sub`, not in that normalization). Levels are per engine instance, shared by all voices. Default: `saw` 1.0, other at-pitch levels 0, `sub` 0. Level 0 skips that oscillator’s DSP. `wave saw|square|triangle|sine` is a preset shortcut: chosen at-pitch level 1.0, other three 0, `sub` 0. Pulse width still square-only.
@@ -110,10 +120,13 @@ Five sources per engine: saw, square, triangle, and sine at pitch (levels normal
 Each voice has a sine sub mixed after the normalized at-pitch blend and before the filter. Sub pitch tracks the sounding frequency (including assignable-envelope pitch), one or two octaves down. `sub` is 0..1 (default 0, additive); when 0 the sine sample math is skipped. `suboct` is 1 or 2 (default 1).
 
 **Filter and assignable envelopes**
-Three ADSRs per voice. Amp owns voice lifetime. Cutoff uses exponential signed-octave modulation; stacking adds octave offsets. Assignable dests are off, resonance, pitch, and cutoff. Times are independent. `env copy` snapshots amp times onto the other two. `env link` snaps then follows `amp` time commands; a `fenv` or `asenv` time command unlinks. Shared `env vel` defaults to 0; separate velocity controls can be added later if needed. Key tracking is not in this slice.
+Three ADSRs per voice. Amp owns voice lifetime. Cutoff uses exponential signed-octave modulation; stacking adds octave offsets. Assignable dests are off, resonance, pitch, cutoff, pulse width, and amp. Amp dest is extra loudness only. The dedicated amp ADSR still owns voice lifetime. Times are independent. `env copy` snapshots amp times onto the other two. `env link` snaps then follows `amp` time commands; a `fenv` or `asenv` time command unlinks. Shared `env vel` defaults to 0 and scales the three ADSR amounts only. Separate velocity controls can be added later if needed. Key tracking is not in this slice.
+
+**Two assignable LFOs**
+Two LFOs share the assignable destination list. Settings (dest, amount, rate, wave, retrig) are per engine instance. Each voice runs its own pair. Levels are bipolar (-1..1). Retrig defaults on and resets that voice's LFO phase on note-on. Rate is 0.05..20 Hz (default 1). Waves: sine, triangle, square, saw (rising), and sample-and-hold. Two sources on the same dest add, then that dest is applied once.
 
 **Terminal param control for laptop development**
-Laptop hosts (via `host-common`) change engine params with compact grouped line commands. Commands target a current engine (`eng 1` through `eng 4`, 1-based, space required). Unqualified commands hit current. `eng 2 cutoff 800` is one-shot and does not change current. Routing commands: `on`, `off`, `ch <1..16>`, `vol <0..1>`. Oscillator levels: `saw`, `sq`, `tri`, `sin`, and `sub` (each `<0..1>`). `wave saw|square|triangle|sine` is a solo preset (one at-pitch level 1.0, others 0, `sub` 0). `pw <0.05..0.95>` sets square pulse width. `suboct 1|2` sets the sub octave. ADSR commands use `amp a|d|s|r`, `fenv a|d|s|r`, and `asenv a|d|s|r`; the latter two also support `amt`, and `asenv` supports `dest`. Shared operations use `env copy`, `env link`, and `env vel`. `show` prints a replayable qualified patch from a host-side copy. `random` fills subtractive params including random levels for all five oscillators plus volume (0.2–1.0) and does not change on/off or listen channel. Printed patches use canonical `eng N ...` lines. Earlier flat command names remain parser aliases but are not printed or documented as canonical commands. Same commands on `host-wsl` and `host-windows`. Real MIDI CC from the Polyend or other devices are a later session. High-rate knobs/CC may later use atomics plus smoothing; discrete commands and note events use the SPSC queue now.
+Laptop hosts (via `host-common`) change engine params with compact grouped line commands. Commands target a current engine (`eng 1` through `eng 4`, 1-based, space required). Unqualified commands hit current. `eng 2 cutoff 800` is one-shot and does not change current. Routing commands: `on`, `off`, `ch <1..16>`, `vol <0..1>`. Oscillator levels: `saw`, `sq`, `tri`, `sin`, and `sub` (each `<0..1>`). `wave saw|square|triangle|sine` is a solo preset (one at-pitch level 1.0, others 0, `sub` 0). `pw <0.05..0.95>` sets square pulse width. `suboct 1|2` sets the sub octave. ADSR commands use `amp a|d|s|r`, `fenv a|d|s|r`, and `asenv a|d|s|r`; the latter two also support `amt`, and `asenv dest` accepts `off|res|pitch|cutoff|pw|amp`. LFO commands (space required, like `eng 2`): `lfo 1` and `lfo 2` with fields `dest`, `amt`, `rate`, `wave`, `retrig`. Defaults: dest off, amt 0, rate 1 Hz, wave sine, retrig on. Rate is 0.05..20 Hz. Waves: `sine`, `tri`, `square`, `saw`, `sh` (aliases `triangle`, `sq`, `snh`). `lfo1` is invalid. Shared operations use `env copy`, `env link`, and `env vel`. `show` prints a replayable qualified patch from a host-side copy. `random` fills subtractive params including random levels for all five oscillators, both LFOs, plus volume (0.2–1.0) and does not change on/off or listen channel. Printed patches use canonical `eng N ...` lines. Earlier flat command names remain parser aliases but are not printed or documented as canonical commands. Same commands on `host-wsl` and `host-windows`. Real MIDI CC from the Polyend or other devices are a later session. High-rate knobs/CC may later use atomics plus smoothing; discrete commands and note events use the SPSC queue now.
 
 **Multitimbral routing with per-engine volume**
 Four engine instances live in a mixer in the `engine` crate. Instance 1 starts enabled on listen channel 1. Instances 2–4 start disabled, with listen channels 2, 3, and 4 pre-set. MIDI notes fan out to every enabled instance whose listen channel matches. Disabled instances are skipped in the audio loop and ignore notes. `off` silences that instance immediately. Volume is per instance via terminal `vol` (default 1.0). MIDI CC volume waits with the rest of CC mapping. Physical knobs later.
@@ -147,3 +160,6 @@ The audio callback must never block or wait, since a stall causes audible clicks
 
 **Laptop audio and MIDI device selection**
 If there is exactly one output device or one MIDI input port, the host uses it automatically. If there are several, it lists them and asks for a number. Same behavior on `host-wsl` and `host-windows`.
+
+**Personal WSL play launcher**
+A gitignored `play` file at the repo root. From WSL, `./play` opens a new Windows PowerShell 5.1 window and returns immediately. That window uses the documented Windows play recipe (`CARGO_TARGET_DIR` on the Windows drive, `CARGO_INCREMENTAL=0`, `cargo run -p host-windows`) and stays open after the host exits. The Windows `cd` path is hard-coded to `\\wsl$\Ubuntu\home\capinha\audio_experiments\stone-raft`. Not a committed project tool.
