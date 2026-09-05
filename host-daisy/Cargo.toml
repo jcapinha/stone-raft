@@ -24,3 +24,9 @@ name = "double-blink"
 path = "src/bin/double_blink.rs"
 test = false
 bench = false
+
+[[bin]]
+name = "breadboard-led"
+path = "src/bin/breadboard_led.rs"
+test = false
+bench = false
