@@ -18,6 +18,9 @@ use voices::Voices;
 /// Fixed number of simultaneous voices per engine instance.
 pub const VOICE_COUNT: usize = 4;
 
+/// Calibrates one engine's summed voices to a healthy full output at `vol 1`.
+const ENGINE_OUTPUT_GAIN: f32 = 1.75;
+
 const AMT_MIN: f32 = -8.0;
 const AMT_MAX: f32 = 8.0;
 
@@ -465,13 +468,13 @@ impl Engine {
         self.next_sample_calls
     }
 
-    /// Sums active voices into one mono sample in roughly [-1.0, 1.0].
+    /// Sums active voices and applies the engine's fixed output calibration.
     pub fn next_sample(&mut self) -> f32 {
         #[cfg(test)]
         {
             self.next_sample_calls = self.next_sample_calls.wrapping_add(1);
         }
-        self.voices.render_sample(&self.params)
+        self.voices.render_sample(&self.params) * ENGINE_OUTPUT_GAIN
     }
 }
 
@@ -481,8 +484,8 @@ mod tests {
 
     const SAMPLE_RATE_HZ: f32 = 48_000.0;
     const ANALYSIS_SAMPLES: usize = 4096;
-    const TONE_PRESENT: f32 = 0.02;
-    const TONE_ABSENT: f32 = 0.01;
+    const TONE_PRESENT: f32 = 0.02 * ENGINE_OUTPUT_GAIN;
+    const TONE_ABSENT: f32 = 0.01 * ENGINE_OUTPUT_GAIN;
 
     fn take_samples(engine: &mut Engine, count: usize) -> Vec<f32> {
         (0..count).map(|_| engine.next_sample()).collect()
@@ -502,6 +505,12 @@ mod tests {
 
     fn peak_abs(samples: &[f32]) -> f32 {
         samples.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()))
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        let mean_square =
+            samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32;
+        libm::sqrtf(mean_square)
     }
 
     fn note_on(engine: &mut Engine, note: u8, velocity: u8) {
@@ -908,6 +917,46 @@ mod tests {
         assert!(
             (measured_ratio - expected_ratio).abs() / expected_ratio < 0.25,
             "peak ratio {measured_ratio} should be near amp ratio {expected_ratio}"
+        );
+    }
+
+    #[test]
+    fn default_engine_output_has_calibrated_level_and_headroom() {
+        fn measure(notes: &[u8], velocity: u8) -> (f32, f32) {
+            let mut engine = Engine::new(SAMPLE_RATE_HZ);
+            for &note in notes {
+                note_on(&mut engine, note, velocity);
+            }
+            let samples = take_samples(&mut engine, SAMPLE_RATE_HZ as usize);
+            let sustain = &samples[samples.len() - ANALYSIS_SAMPLES..];
+            (peak_abs(&samples), rms(sustain))
+        }
+
+        let velocity_100 = measure(&[60], 100);
+        let velocity_127 = measure(&[60], 127);
+        let chord = measure(&[60, 64, 67, 71], 127);
+
+        assert!(
+            velocity_100.0 >= 0.15 && velocity_100.1 >= 0.05,
+            "velocity-100 note should have a healthy level; peak={} rms={}",
+            velocity_100.0,
+            velocity_100.1
+        );
+        assert!(
+            velocity_127.0 > velocity_100.0 && velocity_127.1 > velocity_100.1,
+            "velocity-127 note should be louder; v100={velocity_100:?} v127={velocity_127:?}"
+        );
+        assert!(
+            chord.0 >= 0.70 && chord.0 <= 0.80,
+            "four-note reference should be loud with headroom; peak={} rms={}",
+            chord.0,
+            chord.1
+        );
+        assert!(
+            chord.1 >= 0.17 && chord.1 <= 0.20,
+            "four-note reference RMS should stay in its calibrated range; peak={} rms={}",
+            chord.0,
+            chord.1
         );
     }
 

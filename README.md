@@ -59,6 +59,8 @@ cargo run -p host-windows
 
 One audio or MIDI device is selected automatically. Multiple devices produce a numbered prompt. MIDI notes reach every enabled engine on the matching listen channel. Engine 1 starts enabled on channel 1; engines 2–4 start disabled on channels 2–4.
 
+Each engine has a fixed 1.75 output calibration before its own `vol` control. `vol 1` is that synth's calibrated full output. When several engines play together, lower their individual volumes if the combined output clips. This behavior is the same in the WSL and PowerShell hosts.
+
 Without MIDI, the current enabled engine uses this C4 keyboard octave. An off engine prints the `on` command needed to enable it.
 
 | Keys | Notes |
@@ -76,7 +78,7 @@ The four at-pitch oscillator levels are normalized as weights. Sub is additive. 
 | Command | Meaning |
 |---------|---------|
 | `eng`; `eng <1..4>` | Show current engine; switch current engine |
-| `on`; `off`; `ch <1..16>`; `vol <0..1>` | Enable, disable immediately, route, and set instance volume |
+| `on`; `off`; `ch <1..16>`; `vol <0..1>` | Enable, disable immediately, route, and set the engine's output volume |
 | `show` | Print a replayable qualified patch with all five oscillator levels |
 | `cutoff <Hz>`; `res <0..1>` | Filter cutoff and resonance |
 | `amp a <ms>`; `amp d <ms>`; `amp s <0..1>`; `amp r <ms>` | Amp ADSR |

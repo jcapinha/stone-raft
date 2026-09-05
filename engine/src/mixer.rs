@@ -206,6 +206,13 @@ mod tests {
         }
     }
 
+    fn volume(instance: u8, amount: f32) -> MixerEvent {
+        MixerEvent::ToInstance {
+            instance,
+            event: InstanceEvent::SetVolume { amount },
+        }
+    }
+
     fn midi_on(channel: u8) -> MixerEvent {
         MixerEvent::MidiNoteOn {
             channel,
@@ -315,6 +322,45 @@ mod tests {
         assert!(
             peak_two > peak_one * 1.4,
             "two instances should mix louder; one={peak_one} two={peak_two}"
+        );
+    }
+
+    #[test]
+    fn instance_volume_scales_output_proportionally() {
+        let mut full = Mixer::new(SAMPLE_RATE_HZ);
+        prepare_instance(&mut full, 1);
+        full.apply(midi_on(1));
+        let full_peak = peak_after(&mut full, 2_000, 1_000);
+
+        let mut half = Mixer::new(SAMPLE_RATE_HZ);
+        prepare_instance(&mut half, 1);
+        half.apply(volume(1, 0.5));
+        half.apply(midi_on(1));
+        let half_peak = peak_after(&mut half, 2_000, 1_000);
+
+        let ratio = half_peak / full_peak;
+        assert!(
+            (ratio - 0.5).abs() < 0.01,
+            "vol 0.5 should produce half the peak of vol 1; full={full_peak} half={half_peak}"
+        );
+    }
+
+    #[test]
+    fn balanced_four_instance_mix_stays_within_output_range() {
+        let mut mixer = Mixer::new(SAMPLE_RATE_HZ);
+        for instance in 1..=4 {
+            prepare_instance(&mut mixer, instance);
+            mixer.apply(enable(instance, true));
+            mixer.apply(listen(instance, 1));
+            mixer.apply(volume(instance, 0.25));
+        }
+
+        mixer.apply(midi_on(1));
+        let peak = peak_after(&mut mixer, 2_000, 1_000);
+
+        assert!(
+            peak <= 1.0,
+            "balanced engine volumes should keep the combined mix in range; peak={peak}"
         );
     }
 
