@@ -1009,10 +1009,11 @@ dependencies = [
  "defmt 1.1.1",
  "defmt-rtt",
  "embassy-executor",
- "embassy-futures",
+ "embassy-stm32",
  "embassy-time",
  "embedded-graphics",
  "engine",
+ "grounded",
  "heapless",
  "panic-probe",
  "rand",
@@ -1882,7 +1883,6 @@ dependencies = [
  "display-interface-spi",
  "embedded-graphics-core",
  "embedded-hal 1.0.0",
- "embedded-hal-async",
  "maybe-async-cfg",
 ]
 
