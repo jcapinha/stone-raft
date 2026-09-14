@@ -167,6 +167,9 @@ The permanent `double-blink` diagnostic is the first Seed 3 firmware test. Build
 **Breadboard OLED and button demo**
 `breadboard-led` drives a 0.96" SSD1306 (I2C D11/D12): `Hello` for 3 s, then sleep. First D15 press plays C4-E4-G4 (1 s gate, 2 s rest); later presses `random` then replay. Extra presses during a sequence are ignored. OLED is a rolling scope while notes sound, then a condensed patch card. LED on D24 follows the gate. Audio is line-level on Audio Out 1 and AGND.
 
+**Breadboard rolling scope (current)**
+OLED I2C at 400 kHz. Scope reads a 128-sample atomic ring filled from the audio loop; UI redraws on a ~33 ms timer with `clear_buffer` each frame so old pixels do not ghost. Waveform is clamped to a middle band (rows 12–52), so loud peaks flatten at the band edge. SPI4 is masked during every blocking OLED flush so I2C is not interrupted; scope stays choppy (~1–2 FPS while notes move, ~20 FPS on silence) because full-frame flushes compete with audio. Acceptable for bring-up; smoother scope is a later session. Min/max column thickness and unmasked scope flushes were tried and rejected or deferred.
+
 **Lock-free control signals into the audio callback**
 The audio callback must never block or wait, since a stall causes audible clicks. Never use a `Mutex` on that path. Note on/off and discrete param changes use a host-owned lock-free SPSC queue (`rtrb` on the laptop, `heapless` spsc on the Daisy). Only the audio thread calls into the engine. Display drawing stays off that path. On the laptop hosts, a `Mutex` may guard the queue *producer* when both MIDI and the terminal push events; that lock is never taken inside the audio callback. Atomics plus smoothing are reserved for a later high-rate knob/CC path.
 

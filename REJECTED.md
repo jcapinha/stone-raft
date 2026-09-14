@@ -20,3 +20,7 @@ Closed doors. Do not re-propose these unless the author explicitly reopens them 
 - **Runtime path discovery for ./play (`wslpath`)** — rejected; the local script hard-codes `\\wsl$\Ubuntu\home\capinha\audio_experiments\stone-raft`.
 - **Separate destination list for LFOs** — abandoned. LFOs share `AssignableDest` with the assignable envelope.
 - **Glued LFO tokens (`lfo1`)** — parser requires `lfo 1` with a space, matching `eng 2`.
+- **Unmasked SPI4 during scope OLED flushes** — tried; I2C corrupts and the display stops updating. Every blocking flush masks SPI4.
+- **Enlarging the audio DMA buffer to absorb OLED stalls** — rejected; adds latency and does not fix I2C mid-transfer corruption.
+- **On-screen `AUDIO STALL` during scope** — rejected; false positives while OLED masking pauses sample pushes, and the message caused visible flashing.
+- **Min/max scope columns (Phase 4)** — deferred; current scope is good enough for bring-up. Reopen only if smoother refresh is solved first.

@@ -13,13 +13,14 @@
 //! - 3V3 digital = physical pin 38. OLED VDD. Do not use analog 3V3 on pin 21.
 //! - GND = physical pin 40. Shared ground for OLED, LED cathode, and button.
 //!
-//! Boot flashes the breadboard LED three times. OLED uses blocking I2C at 100 kHz
+//! Boot flashes the breadboard LED three times. OLED uses blocking I2C at 400 kHz
 //! with a 200 ms timeout so a missing screen cannot freeze the button. Hello is
 //! drawn before audio starts. Each press plays C4-E4-G4 with the LED on during
 //! each 1 s gate. Later presses run `random`, then the same arpeggio. The OLED is
 //! a rolling scope while notes sound, then a condensed patch card. Audio runs on
-//! an interrupt executor; that interrupt is masked only for each OLED transfer so
-//! I2C cannot be cut off mid-frame. Recoverable DMA overruns yield, then refill.
+//! an interrupt executor; SPI4 is masked during each blocking OLED transfer so
+//! I2C is not cut off mid-frame. Scope uses partial band updates to keep those
+//! windows short. Recoverable DMA overruns yield, then refill.
 
 use core::fmt::Write;
 use core::slice;
@@ -70,7 +71,12 @@ const OLED_INIT_TIMEOUT_MS: u64 = 200;
 const BOOT_FLASH_MS: u64 = 100;
 const DEBOUNCE_MS: u64 = 30;
 const POLL_MS: u64 = 10;
-const SCOPE_FRAME_MS: u64 = 80;
+const SCOPE_UI_YIELD_MS: u64 = 8;
+const SCOPE_MIN_FRAME_MS: u64 = 33;
+const SCOPE_TOP: i32 = 12;
+const SCOPE_BOTTOM: i32 = 52;
+const SCOPE_MID_Y: i32 = (SCOPE_TOP + SCOPE_BOTTOM) / 2;
+const SCOPE_FPS_LABEL_MS: u64 = 500;
 const SCOPE_LEN: usize = 128;
 const SCOPE_DOWNSAMPLE: usize = 8;
 const SCOPE_MEAN_DEVIATION_HEIGHT: f32 = 14.0;
@@ -113,7 +119,6 @@ unsafe fn SPI4() {
 struct ScopeBuffer {
     samples: [AtomicU32; SCOPE_LEN],
     write: AtomicUsize,
-    write_count: AtomicU32,
 }
 
 impl ScopeBuffer {
@@ -122,7 +127,6 @@ impl ScopeBuffer {
         Self {
             samples: [ZERO; SCOPE_LEN],
             write: AtomicUsize::new(0),
-            write_count: AtomicU32::new(0),
         }
     }
 
@@ -130,11 +134,6 @@ impl ScopeBuffer {
         let index = self.write.load(Ordering::Relaxed);
         self.samples[index].store(sample.to_bits(), Ordering::Relaxed);
         self.write.store((index + 1) % SCOPE_LEN, Ordering::Release);
-        self.write_count.fetch_add(1, Ordering::Release);
-    }
-
-    fn write_count(&self) -> u32 {
-        self.write_count.load(Ordering::Acquire)
     }
 
     fn snapshot(&self) -> [f32; SCOPE_LEN] {
@@ -165,7 +164,7 @@ async fn main(_spawner: Spawner) {
     boot_flash(&mut led).await;
 
     let mut i2c_config = i2c::Config::default();
-    i2c_config.frequency = Hertz::khz(100);
+    i2c_config.frequency = Hertz::khz(400);
     i2c_config.timeout = Duration::from_millis(OLED_INIT_TIMEOUT_MS);
     i2c_config.sda_pullup = true;
     i2c_config.scl_pullup = true;
@@ -288,7 +287,7 @@ fn prepare_audio_output(audio: AudioPeripherals<'static>) -> Sai<'static, periph
     )
 }
 
-fn with_oled_bus<R>(f: impl FnOnce() -> R) -> R {
+fn with_oled_bus_masked<R>(f: impl FnOnce() -> R) -> R {
     let audio_was_running = interrupt::SPI4.is_enabled();
     if audio_was_running {
         interrupt::SPI4.disable();
@@ -296,7 +295,7 @@ fn with_oled_bus<R>(f: impl FnOnce() -> R) -> R {
     let result = f();
     if audio_was_running {
         // SAFETY: SPI4 was already enabled for AUDIO_EXECUTOR. Masking it only
-        // around a blocking OLED transfer keeps I2C from being cut off mid-frame.
+        // around blocking OLED transfers keeps I2C from being cut off mid-frame.
         unsafe {
             interrupt::SPI4.enable();
         }
@@ -305,13 +304,13 @@ fn with_oled_bus<R>(f: impl FnOnce() -> R) -> R {
 }
 
 fn oled_flush(display: &mut OledDisplay) {
-    with_oled_bus(|| {
+    with_oled_bus_masked(|| {
         let _ = display.flush();
     });
 }
 
 fn oled_set_on(display: &mut OledDisplay, on: bool) {
-    with_oled_bus(|| {
+    with_oled_bus_masked(|| {
         let _ = display.set_display_on(on);
     });
 }
@@ -360,7 +359,7 @@ fn init_oled(i2c: OledI2c) -> Option<OledDisplay> {
     let interface = I2CDisplayInterface::new(i2c);
     let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
-    match with_oled_bus(|| display.init()) {
+    match with_oled_bus_masked(|| display.init()) {
         Ok(()) => {
             info!("oled ready");
             let _ = display.clear(BinaryColor::Off);
@@ -411,16 +410,38 @@ async fn play_arpeggio(
 
 async fn scope_for(ms: u64, mut display: Option<&mut OledDisplay>) {
     let deadline = Instant::now() + Duration::from_millis(ms);
-    let mut previous_write_count = SCOPE.write_count();
+    let mut last_draw = Instant::now();
+    let mut fps_frames = 0u32;
+    let mut fps = 0u32;
+    let mut fps_window = Instant::now();
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let frame = Duration::from_millis(SCOPE_FRAME_MS);
-        Timer::after(core::cmp::min(remaining, frame)).await;
         if let Some(display) = display.as_deref_mut() {
-            let write_count = SCOPE.write_count();
-            draw_scope(display, write_count.wrapping_sub(previous_write_count));
-            previous_write_count = write_count;
+            if Instant::now()
+                .saturating_duration_since(last_draw)
+                .as_millis()
+                < SCOPE_MIN_FRAME_MS
+            {
+                Timer::after_millis(SCOPE_UI_YIELD_MS).await;
+                continue;
+            }
+            last_draw = Instant::now();
+            fps_frames += 1;
+            if Instant::now()
+                .saturating_duration_since(fps_window)
+                .as_millis()
+                >= SCOPE_FPS_LABEL_MS
+            {
+                let elapsed_ms = Instant::now()
+                    .saturating_duration_since(fps_window)
+                    .as_millis()
+                    .max(1) as u32;
+                fps = fps_frames.saturating_mul(1_000) / elapsed_ms;
+                fps_frames = 0;
+                fps_window = Instant::now();
+            }
+            draw_scope(display, fps);
         }
+        Timer::after_millis(SCOPE_UI_YIELD_MS).await;
     }
 }
 
@@ -432,7 +453,7 @@ fn audio_state() -> AudioState {
     }
 }
 
-fn draw_scope(display: &mut OledDisplay, new_sample_count: u32) {
+fn draw_scope(display: &mut OledDisplay, fps: u32) {
     match audio_state() {
         AudioState::Starting => {
             show_scope_status(display, "AUDIO START");
@@ -443,11 +464,6 @@ fn draw_scope(display: &mut OledDisplay, new_sample_count: u32) {
             return;
         }
         AudioState::Running => {}
-    }
-
-    if new_sample_count == 0 {
-        show_scope_status(display, "AUDIO STALL");
-        return;
     }
 
     let samples = SCOPE.snapshot();
@@ -462,20 +478,42 @@ fn draw_scope(display: &mut OledDisplay, new_sample_count: u32) {
     } else {
         0.0
     };
-    let _ = display.clear(BinaryColor::Off);
+
+    display.clear_buffer();
     let style = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
     for x in 0..SCOPE_LEN - 1 {
-        let y0 = sample_to_y(samples[x] - mean, scale);
-        let y1 = sample_to_y(samples[x + 1] - mean, scale);
+        let y0 = sample_to_scope_y(samples[x] - mean, scale);
+        let y1 = sample_to_scope_y(samples[x + 1] - mean, scale);
         let _ = Line::new(Point::new(x as i32, y0), Point::new((x + 1) as i32, y1))
             .into_styled(style)
             .draw(display);
     }
+    draw_scope_fps(display, fps);
     oled_flush(display);
 }
 
+fn sample_to_scope_y(sample: f32, scale: f32) -> i32 {
+    let y = SCOPE_MID_Y as f32 - sample * scale;
+    y.clamp(SCOPE_TOP as f32, SCOPE_BOTTOM as f32) as i32
+}
+
+fn draw_scope_fps(display: &mut OledDisplay, fps: u32) {
+    let mut label = String::<8>::new();
+    let _ = write!(label, "{fps}");
+    let _ = Text::with_baseline(
+        label.as_str(),
+        Point::new(110, 0),
+        oled_text_style(),
+        Baseline::Top,
+    )
+    .draw(display);
+}
+
 fn show_scope_status(display: &mut OledDisplay, message: &str) {
-    draw_message(display, message, Point::new(31, 28));
+    let _ = display.clear(BinaryColor::Off);
+    let _ = Text::with_baseline(message, Point::new(31, 28), oled_text_style(), Baseline::Top)
+        .draw(display);
+    oled_flush(display);
 }
 
 fn show_patch_card(display: &mut OledDisplay, shadow: &PatchShadow) {
@@ -582,11 +620,6 @@ async fn wait_for_release(button: &Input<'_>) {
         Timer::after_millis(POLL_MS).await;
     }
     Timer::after_millis(DEBOUNCE_MS).await;
-}
-
-fn sample_to_y(sample: f32, scale: f32) -> i32 {
-    let y = 32.0 - sample * scale;
-    y.clamp(0.0, 63.0) as i32
 }
 
 fn f32_to_u24(x: f32) -> u32 {
