@@ -1,47 +1,13 @@
 //! Terminal command parsing and host-side engine state.
 
 use engine::{
-    AdsrTimes, AssignableDest, ControlEvent, EngineParams, EnvelopeField, EnvelopeId,
-    InstanceEvent, LfoId, LfoParams, LfoWave, MixerEvent, SubOctaves, Waveform, ENGINE_COUNT,
-    LFO_RATE_MAX_HZ, LFO_RATE_MIN_HZ,
+    AssignableDest, ControlEvent, ENGINE_COUNT, EngineParams, EnvelopeField, EnvelopeId,
+    InstanceEvent, LfoId, LfoParams, LfoWave, MixerEvent, SubOctaves, Waveform, patch_events,
+    random_patch,
 };
 use rand::Rng;
 
 const KEYBOARD_VELOCITY: u8 = 100;
-
-const RANDOM_CUTOFF_MIN_HZ: f32 = 80.0;
-const RANDOM_CUTOFF_MAX_HZ: f32 = 12_000.0;
-const RANDOM_RES_MAX: f32 = 0.9;
-const RANDOM_TIME_MIN_MS: f32 = 1.0;
-const RANDOM_TIME_MAX_MS: f32 = 2_000.0;
-const RANDOM_AMT_MIN: f32 = -4.0;
-const RANDOM_AMT_MAX: f32 = 4.0;
-const RANDOM_RES_AMT_MIN: f32 = -1.0;
-const RANDOM_RES_AMT_MAX: f32 = 1.0;
-const RANDOM_VOL_MIN: f32 = 0.2;
-const RANDOM_VOL_MAX: f32 = 1.0;
-
-const RANDOM_PULSE_MIN: f32 = 0.05;
-const RANDOM_PULSE_MAX: f32 = 0.95;
-const RANDOM_PW_AMT_MIN: f32 = -0.4;
-const RANDOM_PW_AMT_MAX: f32 = 0.4;
-const RANDOM_AMP_AMT_MIN: f32 = -0.8;
-const RANDOM_AMP_AMT_MAX: f32 = 0.8;
-const RANDOM_ASSIGNABLE_DESTS: [AssignableDest; 6] = [
-    AssignableDest::Off,
-    AssignableDest::Resonance,
-    AssignableDest::Pitch,
-    AssignableDest::Cutoff,
-    AssignableDest::PulseWidth,
-    AssignableDest::Amp,
-];
-const RANDOM_LFO_WAVES: [LfoWave; 5] = [
-    LfoWave::Sine,
-    LfoWave::Triangle,
-    LfoWave::Square,
-    LfoWave::Saw,
-    LfoWave::SampleHold,
-];
 
 struct InstanceShadow {
     params: EngineParams,
@@ -390,21 +356,6 @@ fn parse_targeted_command(line: &str, instance: usize) -> Result<ParsedCommand, 
     }
 }
 
-fn log_uniform<R: Rng>(rng: &mut R, min: f32, max: f32) -> f32 {
-    let log_min = min.ln();
-    let log_max = max.ln();
-    rng.gen_range(log_min..=log_max).exp().clamp(min, max)
-}
-
-fn random_adsr<R: Rng>(rng: &mut R) -> AdsrTimes {
-    AdsrTimes {
-        attack_ms: log_uniform(rng, RANDOM_TIME_MIN_MS, RANDOM_TIME_MAX_MS),
-        decay_ms: log_uniform(rng, RANDOM_TIME_MIN_MS, RANDOM_TIME_MAX_MS),
-        sustain: rng.gen_range(0.0..=1.0),
-        release_ms: log_uniform(rng, RANDOM_TIME_MIN_MS, RANDOM_TIME_MAX_MS),
-    }
-}
-
 fn assignable_dest_name(dest: AssignableDest) -> &'static str {
     match dest {
         AssignableDest::Off => "off",
@@ -423,28 +374,6 @@ fn lfo_wave_name(wave: LfoWave) -> &'static str {
         LfoWave::Square => "square",
         LfoWave::Saw => "saw",
         LfoWave::SampleHold => "sh",
-    }
-}
-
-fn random_amount_for_dest<R: Rng>(rng: &mut R, dest: AssignableDest) -> f32 {
-    match dest {
-        AssignableDest::Resonance => rng.gen_range(RANDOM_RES_AMT_MIN..=RANDOM_RES_AMT_MAX),
-        AssignableDest::PulseWidth => rng.gen_range(RANDOM_PW_AMT_MIN..=RANDOM_PW_AMT_MAX),
-        AssignableDest::Amp => rng.gen_range(RANDOM_AMP_AMT_MIN..=RANDOM_AMP_AMT_MAX),
-        AssignableDest::Off | AssignableDest::Pitch | AssignableDest::Cutoff => {
-            rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX)
-        }
-    }
-}
-
-fn random_lfo<R: Rng>(rng: &mut R) -> LfoParams {
-    let dest = RANDOM_ASSIGNABLE_DESTS[rng.gen_range(0..RANDOM_ASSIGNABLE_DESTS.len())];
-    LfoParams {
-        dest,
-        amount: random_amount_for_dest(rng, dest),
-        rate_hz: log_uniform(rng, LFO_RATE_MIN_HZ, LFO_RATE_MAX_HZ),
-        wave: RANDOM_LFO_WAVES[rng.gen_range(0..RANDOM_LFO_WAVES.len())],
-        retrigger: rng.gen_bool(0.5),
     }
 }
 
@@ -558,171 +487,16 @@ fn format_show(session: &CommandSession, instance: usize) -> String {
     out
 }
 
-fn wrap_engine(instance: usize, event: ControlEvent) -> MixerEvent {
-    to_instance(instance, InstanceEvent::Engine(event))
-}
-
 fn generate_random_patch<R: Rng>(rng: &mut R, instance: usize) -> ParsedCommand {
-    let saw_vol = rng.gen_range(0.0..=1.0);
-    let square_vol = rng.gen_range(0.0..=1.0);
-    let triangle_vol = rng.gen_range(0.0..=1.0);
-    let sine_vol = rng.gen_range(0.0..=1.0);
-    let pulse_width = rng.gen_range(RANDOM_PULSE_MIN..=RANDOM_PULSE_MAX);
-    let cutoff_hz = log_uniform(rng, RANDOM_CUTOFF_MIN_HZ, RANDOM_CUTOFF_MAX_HZ);
-    let resonance = rng.gen_range(0.0..=RANDOM_RES_MAX);
-    let amp = random_adsr(rng);
-    let env_link = rng.gen_bool(0.5);
-    let filter_env = if env_link { amp } else { random_adsr(rng) };
-    let assign_env = if env_link { amp } else { random_adsr(rng) };
-    let filter_env_amount = rng.gen_range(RANDOM_AMT_MIN..=RANDOM_AMT_MAX);
-    let assignable_dest = RANDOM_ASSIGNABLE_DESTS[rng.gen_range(0..RANDOM_ASSIGNABLE_DESTS.len())];
-    let assignable_amount = random_amount_for_dest(rng, assignable_dest);
-    let lfos = [random_lfo(rng), random_lfo(rng)];
-    let env_vel = rng.gen_range(0.0..=1.0);
-    let sub_vol = rng.gen_range(0.0..=1.0);
-    let sub_octaves = if rng.gen_bool(0.5) {
-        SubOctaves::One
-    } else {
-        SubOctaves::Two
-    };
-    let volume = rng.gen_range(RANDOM_VOL_MIN..=RANDOM_VOL_MAX);
-    let params = EngineParams {
-        saw_vol,
-        square_vol,
-        triangle_vol,
-        sine_vol,
-        pulse_width,
-        cutoff_hz,
-        resonance,
-        amp_env: amp,
-        filter_env,
-        assignable_env: assign_env,
-        filter_env_amount,
-        assignable_amount,
-        assignable_dest,
-        env_link,
-        env_vel,
-        sub_vol,
-        sub_octaves,
-        lfos,
-    };
+    let (params, volume) = random_patch(rng);
     let n = instance;
     let mut report = qualified(n, &format!("vol {volume:.2}"));
     report.push_str(&qualify_block(n, &format_param_lines(&params)));
-
-    let mut events = vec![
-        wrap_engine(instance, ControlEvent::SetSawVol { amount: saw_vol }),
-        wrap_engine(instance, ControlEvent::SetSquareVol { amount: square_vol }),
-        wrap_engine(
-            instance,
-            ControlEvent::SetTriangleVol {
-                amount: triangle_vol,
-            },
-        ),
-        wrap_engine(instance, ControlEvent::SetSineVol { amount: sine_vol }),
-        wrap_engine(instance, ControlEvent::SetPulse { width: pulse_width }),
-        wrap_engine(instance, ControlEvent::SetSubVol { amount: sub_vol }),
-        wrap_engine(
-            instance,
-            ControlEvent::SetSubOct {
-                octaves: sub_octaves,
-            },
-        ),
-        wrap_engine(instance, ControlEvent::SetCutoff { hz: cutoff_hz }),
-        wrap_engine(instance, ControlEvent::SetResonance { amount: resonance }),
-        wrap_engine(
-            instance,
-            ControlEvent::SetEnvelope {
-                which: EnvelopeId::Amp,
-                times: amp,
-            },
-        ),
-        wrap_engine(
-            instance,
-            ControlEvent::SetFilterEnvAmount {
-                amount: filter_env_amount,
-            },
-        ),
-        wrap_engine(
-            instance,
-            ControlEvent::SetAssignableDest {
-                dest: assignable_dest,
-            },
-        ),
-        wrap_engine(
-            instance,
-            ControlEvent::SetAssignableAmount {
-                amount: assignable_amount,
-            },
-        ),
-        wrap_engine(instance, ControlEvent::SetEnvVel { amount: env_vel }),
-        to_instance(instance, InstanceEvent::SetVolume { amount: volume }),
-    ];
-    for which in [LfoId::One, LfoId::Two] {
-        let lfo = lfos[which.index()];
-        events.push(wrap_engine(
-            instance,
-            ControlEvent::SetLfoDest {
-                which,
-                dest: lfo.dest,
-            },
-        ));
-        events.push(wrap_engine(
-            instance,
-            ControlEvent::SetLfoAmount {
-                which,
-                amount: lfo.amount,
-            },
-        ));
-        events.push(wrap_engine(
-            instance,
-            ControlEvent::SetLfoRate {
-                which,
-                rate_hz: lfo.rate_hz,
-            },
-        ));
-        events.push(wrap_engine(
-            instance,
-            ControlEvent::SetLfoWave {
-                which,
-                wave: lfo.wave,
-            },
-        ));
-        events.push(wrap_engine(
-            instance,
-            ControlEvent::SetLfoRetrig {
-                which,
-                on: lfo.retrigger,
-            },
-        ));
-    }
-
-    if env_link {
-        events.push(wrap_engine(instance, ControlEvent::SetEnvLink { on: true }));
-    } else {
-        events.push(wrap_engine(
-            instance,
-            ControlEvent::SetEnvLink { on: false },
-        ));
-        events.push(wrap_engine(
-            instance,
-            ControlEvent::SetEnvelope {
-                which: EnvelopeId::Filter,
-                times: filter_env,
-            },
-        ));
-        events.push(wrap_engine(
-            instance,
-            ControlEvent::SetEnvelope {
-                which: EnvelopeId::Assignable,
-                times: assign_env,
-            },
-        ));
-    }
-
     ParsedCommand {
         switch_current: None,
-        events,
+        events: patch_events(instance as u8, &params, volume)
+            .as_slice()
+            .to_vec(),
         print: PrintAfter::Report(report),
     }
 }
@@ -1160,6 +934,7 @@ fn parse_f32_arg(arg: Option<&str>, name: &str) -> Result<f32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::{RANDOM_VOL_MAX, RANDOM_VOL_MIN};
     use rand::SeedableRng;
 
     #[test]
@@ -1505,218 +1280,6 @@ mod tests {
     }
 
     #[test]
-    fn random_patches_stay_in_range_and_respect_envlink() {
-        for seed in 0..32 {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-            let patch = generate_random_patch(&mut rng, 2);
-            let mut saw_link_on = false;
-            let mut saw_link_off = false;
-            let mut extra_env_times = 0usize;
-            let mut env3_dest = AssignableDest::Off;
-            let mut lfo_dests = [AssignableDest::Off; 2];
-            let mut saw_volume = false;
-
-            let mut saw_osc_levels = 0usize;
-            for event in &patch.events {
-                match event {
-                    MixerEvent::ToInstance { instance, event } => {
-                        assert_eq!(*instance, 2);
-                        match event {
-                            InstanceEvent::SetEnabled { .. }
-                            | InstanceEvent::SetListenChannel { .. } => {
-                                panic!(
-                                    "seed {seed}: random must not change enabled or listen channel"
-                                );
-                            }
-                            InstanceEvent::SetVolume { amount } => {
-                                assert!(
-                                    *amount >= RANDOM_VOL_MIN && *amount <= RANDOM_VOL_MAX,
-                                    "seed {seed}: volume {amount} out of range"
-                                );
-                                saw_volume = true;
-                            }
-                            InstanceEvent::Engine(control) => match control {
-                                ControlEvent::SetCutoff { hz } => {
-                                    assert!(
-                                        *hz >= RANDOM_CUTOFF_MIN_HZ && *hz <= RANDOM_CUTOFF_MAX_HZ
-                                    );
-                                }
-                                ControlEvent::SetResonance { amount } => {
-                                    assert!(*amount >= 0.0 && *amount <= RANDOM_RES_MAX);
-                                }
-                                ControlEvent::SetEnvelope { which, times } => {
-                                    assert!(
-                                        times.attack_ms >= RANDOM_TIME_MIN_MS
-                                            && times.attack_ms <= RANDOM_TIME_MAX_MS
-                                    );
-                                    assert!(
-                                        times.decay_ms >= RANDOM_TIME_MIN_MS
-                                            && times.decay_ms <= RANDOM_TIME_MAX_MS
-                                    );
-                                    assert!(
-                                        times.release_ms >= RANDOM_TIME_MIN_MS
-                                            && times.release_ms <= RANDOM_TIME_MAX_MS
-                                    );
-                                    assert!(times.sustain >= 0.0 && times.sustain <= 1.0);
-                                    match which {
-                                        EnvelopeId::Amp => {}
-                                        EnvelopeId::Filter | EnvelopeId::Assignable => {
-                                            extra_env_times += 1
-                                        }
-                                    }
-                                }
-                                ControlEvent::SetEnvVel { amount } => {
-                                    assert!(*amount >= 0.0 && *amount <= 1.0);
-                                }
-                                ControlEvent::SetFilterEnvAmount { amount } => {
-                                    assert!(*amount >= RANDOM_AMT_MIN && *amount <= RANDOM_AMT_MAX);
-                                }
-                                ControlEvent::SetAssignableDest { dest } => env3_dest = *dest,
-                                ControlEvent::SetAssignableAmount { amount } => match env3_dest {
-                                    AssignableDest::Resonance => {
-                                        assert!(
-                                            *amount >= RANDOM_RES_AMT_MIN
-                                                && *amount <= RANDOM_RES_AMT_MAX
-                                        );
-                                    }
-                                    AssignableDest::PulseWidth => {
-                                        assert!(
-                                            *amount >= RANDOM_PW_AMT_MIN
-                                                && *amount <= RANDOM_PW_AMT_MAX
-                                        );
-                                    }
-                                    AssignableDest::Amp => {
-                                        assert!(
-                                            *amount >= RANDOM_AMP_AMT_MIN
-                                                && *amount <= RANDOM_AMP_AMT_MAX
-                                        );
-                                    }
-                                    AssignableDest::Off
-                                    | AssignableDest::Pitch
-                                    | AssignableDest::Cutoff => {
-                                        assert!(
-                                            *amount >= RANDOM_AMT_MIN && *amount <= RANDOM_AMT_MAX
-                                        );
-                                    }
-                                },
-                                ControlEvent::SetEnvLink { on: true } => saw_link_on = true,
-                                ControlEvent::SetEnvLink { on: false } => saw_link_off = true,
-                                ControlEvent::SetPulse { width } => {
-                                    assert!(
-                                        *width >= RANDOM_PULSE_MIN && *width <= RANDOM_PULSE_MAX,
-                                        "seed {seed}: pulse {width} out of range"
-                                    );
-                                }
-                                ControlEvent::SetSubVol { amount } => {
-                                    assert!(
-                                        *amount >= 0.0 && *amount <= 1.0,
-                                        "seed {seed}: subvol {amount} out of range"
-                                    );
-                                }
-                                ControlEvent::SetSubOct { octaves } => {
-                                    assert!(
-                                        matches!(octaves, SubOctaves::One | SubOctaves::Two),
-                                        "seed {seed}: unexpected suboct {octaves:?}"
-                                    );
-                                }
-                                ControlEvent::SetSawVol { amount }
-                                | ControlEvent::SetSquareVol { amount }
-                                | ControlEvent::SetTriangleVol { amount }
-                                | ControlEvent::SetSineVol { amount } => {
-                                    assert!(
-                                        *amount >= 0.0 && *amount <= 1.0,
-                                        "seed {seed}: osc level {amount} out of range"
-                                    );
-                                    saw_osc_levels += 1;
-                                }
-                                ControlEvent::SetLfoDest { which, dest } => {
-                                    lfo_dests[which.index()] = *dest;
-                                }
-                                ControlEvent::SetLfoAmount { which, amount } => {
-                                    match lfo_dests[which.index()] {
-                                        AssignableDest::Resonance => {
-                                            assert!(
-                                                *amount >= RANDOM_RES_AMT_MIN
-                                                    && *amount <= RANDOM_RES_AMT_MAX
-                                            );
-                                        }
-                                        AssignableDest::PulseWidth => {
-                                            assert!(
-                                                *amount >= RANDOM_PW_AMT_MIN
-                                                    && *amount <= RANDOM_PW_AMT_MAX
-                                            );
-                                        }
-                                        AssignableDest::Amp => {
-                                            assert!(
-                                                *amount >= RANDOM_AMP_AMT_MIN
-                                                    && *amount <= RANDOM_AMP_AMT_MAX
-                                            );
-                                        }
-                                        AssignableDest::Off
-                                        | AssignableDest::Pitch
-                                        | AssignableDest::Cutoff => {
-                                            assert!(
-                                                *amount >= RANDOM_AMT_MIN
-                                                    && *amount <= RANDOM_AMT_MAX
-                                            );
-                                        }
-                                    }
-                                }
-                                ControlEvent::SetLfoRate { rate_hz, .. } => {
-                                    assert!(
-                                        *rate_hz >= LFO_RATE_MIN_HZ && *rate_hz <= LFO_RATE_MAX_HZ,
-                                        "seed {seed}: LFO rate {rate_hz} out of range"
-                                    );
-                                }
-                                ControlEvent::SetLfoWave { .. }
-                                | ControlEvent::SetLfoRetrig { .. } => {}
-                                ControlEvent::SetWave { .. }
-                                | ControlEvent::NoteOn { .. }
-                                | ControlEvent::NoteOff { .. }
-                                | ControlEvent::EnvCopy
-                                | ControlEvent::PatchEnvelope { .. } => {}
-                            },
-                        }
-                    }
-                    MixerEvent::MidiNoteOn { .. } | MixerEvent::MidiNoteOff { .. } => {
-                        panic!("seed {seed}: random must not emit MIDI events");
-                    }
-                }
-            }
-
-            assert!(saw_volume, "seed {seed}: random must include volume");
-            assert_eq!(
-                saw_osc_levels, 4,
-                "seed {seed}: random must emit four at-pitch osc level events"
-            );
-            let report = report_text(&patch);
-            assert!(report.contains("eng "));
-            assert!(report.contains("vol"));
-            assert!(report.contains("saw "));
-            assert!(report.contains("sq "));
-            assert!(report.contains("sub "));
-            assert!(report.contains("suboct "));
-            assert!(report.contains("lfo 1 "));
-            assert!(report.contains("lfo 2 "));
-            assert!(
-                saw_link_on ^ saw_link_off,
-                "seed {seed}: expected exactly one envlink setting"
-            );
-            if saw_link_on {
-                assert_eq!(
-                    extra_env_times, 0,
-                    "seed {seed}: linked patch must not send extra envelope times"
-                );
-            } else {
-                assert_eq!(
-                    extra_env_times, 2,
-                    "seed {seed}: unlinked patch should set filter and assignable times"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn eng_2_cutoff_is_oneshot() {
         let mut session = CommandSession::new();
         assert_eq!(session.current_instance, 1);
@@ -1725,10 +1288,12 @@ mod tests {
             .expect("command");
         assert!(parsed.switch_current.is_none());
         match parsed.events.as_slice() {
-            [MixerEvent::ToInstance {
-                instance: 2,
-                event: InstanceEvent::Engine(ControlEvent::SetCutoff { hz }),
-            }] => assert!((*hz - 800.0).abs() < f32::EPSILON),
+            [
+                MixerEvent::ToInstance {
+                    instance: 2,
+                    event: InstanceEvent::Engine(ControlEvent::SetCutoff { hz }),
+                },
+            ] => assert!((*hz - 800.0).abs() < f32::EPSILON),
             other => panic!("unexpected {other:?}"),
         }
         apply_parsed(&mut session, &parsed);
@@ -1873,14 +1438,16 @@ mod tests {
             .expect("command");
         assert!(parsed.switch_current.is_none());
         match parsed.events.as_slice() {
-            [MixerEvent::ToInstance {
-                instance: 2,
-                event:
-                    InstanceEvent::Engine(ControlEvent::SetLfoRate {
-                        which: LfoId::One,
-                        rate_hz,
-                    }),
-            }] => assert!((*rate_hz - 4.0).abs() < f32::EPSILON),
+            [
+                MixerEvent::ToInstance {
+                    instance: 2,
+                    event:
+                        InstanceEvent::Engine(ControlEvent::SetLfoRate {
+                            which: LfoId::One,
+                            rate_hz,
+                        }),
+                },
+            ] => assert!((*rate_hz - 4.0).abs() < f32::EPSILON),
             other => panic!("unexpected {other:?}"),
         }
         apply_parsed(&mut session, &parsed);

@@ -1,16 +1,20 @@
 # stone-raft
 
-A portable Daisy Seed 3 synthesizer written in Rust as a personal first Rust project. See [`CONTEXT.md`](CONTEXT.md) for project decisions and language, and [`REJECTED.md`](REJECTED.md) for closed doors. I use my version of the skill `/grill-with-docs` to stress-test plans and update both files.
+A portable Daisy Seed 3 synthesizer written in Rust as a personal first Rust project. See `[CONTEXT.md](CONTEXT.md)` for project decisions and language, and `[REJECTED.md](REJECTED.md)` for closed doors. I use my version of the skill `/grill-with-docs` to stress-test plans and update both files.
 
 ## Workspace
 
-- [`engine/`](engine): `no_std` sound generation shared by every host
-- [`host-common/`](host-common): shared laptop audio, MIDI, commands, and keyboard input
-- [`host-wsl/`](host-wsl): WSL/Linux host for development and optional listening
-- [`host-windows/`](host-windows): native Windows host for reliable audio, MIDI, and key release
-- [`host-daisy/`](host-daisy): Seed 3 firmware and hardware diagnostics using daisy-embassy
+- `[engine/](engine)`: `no_std` sound generation shared by every host
+- `[host-common/](host-common)`: shared laptop audio, MIDI, commands, and keyboard input
+- `[host-wsl/](host-wsl)`: WSL/Linux host for development and optional listening
+- `[host-windows/](host-windows)`: native Windows host for reliable audio, MIDI, and key release
+- `[host-daisy/](host-daisy)`: Seed 3 firmware and hardware diagnostics using daisy-embassy
+
+
 
 ## Laptop hosts
+
+
 
 ### WSL
 
@@ -55,6 +59,8 @@ $env:CARGO_INCREMENTAL = "0"
 cargo run -p host-windows
 ```
 
+
+
 ### Playing
 
 One audio or MIDI device is selected automatically. Multiple devices produce a numbered prompt. MIDI notes reach every enabled engine on the matching listen channel. Engine 1 starts enabled on channel 1; engines 2–4 start disabled on channels 2–4.
@@ -63,9 +69,11 @@ Each engine has a fixed 1.75 output calibration before its own `vol` control. `v
 
 Without MIDI, the current enabled engine uses this C4 keyboard octave. An off engine prints the `on` command needed to enable it.
 
-| Keys | Notes |
-|------|-------|
+
+| Keys                        | Notes                          |
+| --------------------------- | ------------------------------ |
 | `A W S E D F T G Y H U J K` | C C# D D# E F F# G G# A A# B C |
+
 
 Press `q` to quit. In MIDI mode, press Enter afterward. WSL terminals do not report key release, so notes use amp release and voice stealing. Native Windows supports hold-to-play.
 
@@ -74,6 +82,7 @@ Press `q` to quit. In MIDI mode, press Enter afterward. WSL terminals do not rep
 Enter commands directly in MIDI mode. In keyboard mode, press `/`, type one command, and press Enter. Unqualified commands target the current engine. `eng 2 cutoff 800` targets engine 2 once without changing the current engine; `eng2` is invalid.
 
 The four at-pitch oscillator levels are normalized as weights. Sub is additive. Level 0 skips that oscillator's DSP. `wave` selects one at-pitch oscillator and sets all other oscillator and sub levels to 0.
+
 
 | Command | Meaning |
 |---------|---------|
@@ -94,6 +103,7 @@ The four at-pitch oscillator levels are normalized as weights. Sub is additive. 
 | `env copy`; `env link on|off`; `env vel <0..1>` | Copy amp times, link envelope times, and scale extra envelopes by velocity |
 | `random` | Randomize subtractive parameters, both LFOs, and volume `0.2..1.0`; keep enabled state and channel |
 
+
 `show` and `random` print qualified `eng N` lines and do not change enabled state or listen channel.
 
 Example:
@@ -110,6 +120,8 @@ pw 0.2
 show
 random
 ```
+
+
 
 ## Daisy double blink
 
@@ -173,6 +185,30 @@ The device normally reports USB ID `0483:df11`. If Windows can see it but `dfu-u
 
 Confirm the double blink after flashing the firmware. If necessary, press RESET, and disconnect and reconnect USB power.
 
+## Daisy breadboard play
+
+`breadboard-led` runs the synth engine through the Seed 3 codec, plus a 0.96" I2C OLED and the breadboard button/LED. Boot flashes the LED three times. OLED uses blocking I2C at 400 kHz with a 200 ms timeout so a missing screen cannot freeze the button. Hello is drawn before audio starts, stays for 3 seconds, then the screen sleeps. Audio runs on a higher-priority interrupt executor; SPI4 is masked during each blocking OLED flush so I2C is not cut off mid-transfer. First button press plays C4, E4, G4 (1 s gate, 2 s rest). Later presses apply `random`, then replay. While notes sound the OLED is a rolling scope of recent mixer samples (waveform clamped to a middle band; expect choppy refresh while notes move, faster on silence). After the arpeggio it shows a condensed patch card. The LED is on only during each 1 s gate.
+
+Audio is line-level on Audio Out 1 (pin 18) and AGND (pin 20). Use a powered speaker or mixer, not passive earbuds. OLED power is 3.3 V digital (pin 38) and GND (pin 40). Do not use analog 3.3 V on pin 21.
+
+Wiring walkthrough for another agent: `[host-daisy/BREADBOARD_SETUP_PROMPT.md](host-daisy/BREADBOARD_SETUP_PROMPT.md)`.
+
+One-time ARM/`dfu-util` setup is the same as double blink. When the repository is under `\\wsl$\...`, set `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` as shown in the Windows host section before building. Before flashing from WSL, put the Seed into DFU mode and attach the device shown by `usbipd list`.
+
+Build and flash from the repository root in PowerShell or WSL:
+
+```text
+cargo build -p host-daisy --bin breadboard-led --target thumbv7em-none-eabihf --release
+cargo objcopy -p host-daisy --bin breadboard-led --target thumbv7em-none-eabihf --release -- -O binary breadboard-led.bin
+```
+
+```text
+dfu-util --list
+dfu-util -a 0 -s 0x08000000:leave -D breadboard-led.bin
+```
+
+The generated `.bin` is disposable. Flashing it replaces the current internal program.
+
 ## Tests
 
 Same command in WSL or PowerShell:
@@ -180,3 +216,4 @@ Same command in WSL or PowerShell:
 ```text
 cargo test -p engine -p host-common
 ```
+

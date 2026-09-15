@@ -10,14 +10,26 @@ cortex-m = { version = "0.7", features = [
 ] }
 cortex-m-rt = { version = "0.7", features = ["device"] }
 daisy-embassy = { version = "0.3", features = ["seed3"] }
+# daisy-embassy enables the STM32 time driver but not this feature. Without it,
+# I2C waits never time out and can block the button and LED.
+embassy-stm32 = { version = "0.6.0", features = ["time"] }
+defmt = "1"
 defmt-rtt = "1"
 embassy-executor = { version = "0.10", features = [
     "defmt",
     "executor-thread",
+    "executor-interrupt",
     "platform-cortex-m",
 ] }
 embassy-time = "0.5"
+embedded-graphics = "0.8"
+engine = { path = "../engine" }
+grounded = "0.2.1"
+heapless = { version = "0.9", default-features = false }
 panic-probe = { version = "1", features = ["print-defmt"] }
+rand = { version = "0.8", default-features = false, features = ["small_rng"] }
+ssd1306 = "0.10"
+static_cell = "2"
 
 [[bin]]
 name = "double-blink"

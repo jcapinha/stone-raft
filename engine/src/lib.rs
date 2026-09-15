@@ -5,6 +5,7 @@ mod filter;
 mod lfo;
 mod mixer;
 mod oscillator;
+mod random;
 mod voices;
 
 pub use envelope::{Adsr, AdsrTimes, EnvelopeStage, velocity_to_amp};
@@ -12,6 +13,13 @@ pub use filter::Svf;
 pub use lfo::{LFO_RATE_DEFAULT_HZ, LFO_RATE_MAX_HZ, LFO_RATE_MIN_HZ, LfoId, LfoParams, LfoWave};
 pub use mixer::{ENGINE_COUNT, InstanceEvent, Mixer, MixerEvent};
 pub use oscillator::{Oscillator, PULSE_WIDTH_DEFAULT, PULSE_WIDTH_MAX, PULSE_WIDTH_MIN, Waveform};
+pub use random::{
+    PATCH_EVENT_MAX, PatchEvents, RANDOM_AMP_AMT_MAX, RANDOM_AMP_AMT_MIN, RANDOM_AMT_MAX,
+    RANDOM_AMT_MIN, RANDOM_CUTOFF_MAX_HZ, RANDOM_CUTOFF_MIN_HZ, RANDOM_PULSE_MAX, RANDOM_PULSE_MIN,
+    RANDOM_PW_AMT_MAX, RANDOM_PW_AMT_MIN, RANDOM_RES_AMT_MAX, RANDOM_RES_AMT_MIN, RANDOM_RES_MAX,
+    RANDOM_TIME_MAX_MS, RANDOM_TIME_MIN_MS, RANDOM_VOL_MAX, RANDOM_VOL_MIN, patch_events,
+    random_patch,
+};
 
 use voices::Voices;
 

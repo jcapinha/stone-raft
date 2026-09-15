@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 libm = "0.2.16"
+rand = { version = "0.8", default-features = false }
+
+[dev-dependencies]
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
