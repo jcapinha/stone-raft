@@ -19,8 +19,8 @@
 //! each 1 s gate. Later presses run `random`, then the same arpeggio. The OLED is
 //! a rolling scope while notes sound, then a condensed patch card. Audio runs on
 //! an interrupt executor; SPI4 is masked during each blocking OLED transfer so
-//! I2C is not cut off mid-frame. Scope uses partial band updates to keep those
-//! windows short. Recoverable DMA overruns yield, then refill.
+//! I2C is not cut off mid-frame. Scope redraws the middle band each frame.
+//! Recoverable DMA overruns yield, then refill.
 
 use core::fmt::Write;
 use core::slice;

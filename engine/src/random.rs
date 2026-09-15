@@ -7,7 +7,6 @@ use crate::{
     LFO_RATE_MAX_HZ, LFO_RATE_MIN_HZ, LfoId, LfoParams, LfoWave, MixerEvent, SubOctaves,
 };
 
-/// Enough slots for volume, osc mix, envelopes, both LFOs, and env link.
 pub const PATCH_EVENT_MAX: usize = 32;
 
 pub const RANDOM_CUTOFF_MIN_HZ: f32 = 80.0;
@@ -44,7 +43,6 @@ const RANDOM_LFO_WAVES: [LfoWave; 5] = [
     LfoWave::SampleHold,
 ];
 
-/// Fixed buffer of mixer events for one `random` patch (volume plus params).
 #[derive(Clone, Copy)]
 pub struct PatchEvents {
     events: [MixerEvent; PATCH_EVENT_MAX],
@@ -96,7 +94,6 @@ pub fn random_patch<R: Rng>(rng: &mut R) -> (EngineParams, f32) {
     (params, volume)
 }
 
-/// Mixer events that load `params` and `volume` onto a 1-based instance.
 pub fn patch_events(instance: u8, params: &EngineParams, volume: f32) -> PatchEvents {
     let mut events = [MixerEvent::MidiNoteOff {
         channel: 1,
