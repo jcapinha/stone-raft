@@ -84,24 +84,24 @@ Enter commands directly in MIDI mode. In keyboard mode, press `/`, type one comm
 The four at-pitch oscillator levels are normalized as weights. Sub is additive. Level 0 skips that oscillator's DSP. `wave` selects one at-pitch oscillator and sets all other oscillator and sub levels to 0.
 
 
-| Command                                                          | Meaning                                                                                            |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `eng`; `eng <1..4>`                                              | Show current engine; switch current engine                                                         |
-| `on`; `off`; `ch <1..16>`; `vol <0..1>`                          | Enable, disable immediately, route, and set the engine's output volume                             |
-| `show`                                                           | Print a replayable qualified patch with all five oscillator levels                                 |
-| `cutoff <Hz>`; `res <0..1>`                                      | Filter cutoff and resonance                                                                        |
-| `amp a <ms>`; `amp d <ms>`; `amp s <0..1>`; `amp r <ms>`         | Amp ADSR                                                                                           |
-| `saw <0..1>`; `sq <0..1>`; `tri <0..1>`; `sin <0..1>`            | At-pitch oscillator levels                                                                         |
-| `wave saw                                                        | square                                                                                             |
-| `pw <0.05..0.95>`                                                | Square pulse width; `0.5` is a classic square                                                      |
-| `sub <0..1>`; `suboct 1                                          | 2`                                                                                                 |
-| `fenv amt <signed>`                                              | Filter envelope amount in octaves                                                                  |
-| `fenv a <ms>`; `fenv d <ms>`; `fenv s <0..1>`; `fenv r <ms>`     | Filter ADSR                                                                                        |
-| `asenv dest off                                                  | res                                                                                                |
-| `asenv a <ms>`; `asenv d <ms>`; `asenv s <0..1>`; `asenv r <ms>` | Assignable ADSR                                                                                    |
-| `lfo 1` / `lfo 2` dest off                                       | res                                                                                                |
-| `env copy`; `env link on                                         | off`;` env vel <0..1>`                                                                             |
-| `random`                                                         | Randomize subtractive parameters, both LFOs, and volume `0.2..1.0`; keep enabled state and channel |
+| Command | Meaning |
+|---------|---------|
+| `eng`; `eng <1..4>` | Show current engine; switch current engine |
+| `on`; `off`; `ch <1..16>`; `vol <0..1>` | Enable, disable immediately, route, and set the engine's output volume |
+| `show` | Print a replayable qualified patch with all five oscillator levels |
+| `cutoff <Hz>`; `res <0..1>` | Filter cutoff and resonance |
+| `amp a <ms>`; `amp d <ms>`; `amp s <0..1>`; `amp r <ms>` | Amp ADSR |
+| `saw <0..1>`; `sq <0..1>`; `tri <0..1>`; `sin <0..1>` | At-pitch oscillator levels |
+| `wave saw|square|triangle|sine` | Solo preset; aliases: `sq`, `tri`, `sin` |
+| `pw <0.05..0.95>` | Square pulse width; `0.5` is a classic square |
+| `sub <0..1>`; `suboct 1|2` | Additive sine sub level and octave; defaults are `0` and `1` |
+| `fenv amt <signed>` | Filter envelope amount in octaves |
+| `fenv a <ms>`; `fenv d <ms>`; `fenv s <0..1>`; `fenv r <ms>` | Filter ADSR |
+| `asenv dest off|res|pitch|cutoff|pw|amp`; `asenv amt <signed>` | Assignable destination and amount; octaves for pitch/cutoff, linear for resonance, pulse width, and amp; aliases: `resonance`, `pulse`, `pwm` |
+| `asenv a <ms>`; `asenv d <ms>`; `asenv s <0..1>`; `asenv r <ms>` | Assignable ADSR |
+| `lfo 1` / `lfo 2` dest off|res|pitch|cutoff|pw|amp; amt; rate; wave; retrig | Two assignable LFOs; bipolar swing around the knob; rate 0.05..20 Hz; retrig defaults on; waves `sine`, `tri`, `square`, `saw`, `sh` (aliases `triangle`, `sq`, `snh`); `lfo1` is invalid |
+| `env copy`; `env link on|off`; `env vel <0..1>` | Copy amp times, link envelope times, and scale extra envelopes by velocity |
+| `random` | Randomize subtractive parameters, both LFOs, and volume `0.2..1.0`; keep enabled state and channel |
 
 
 `show` and `random` print qualified `eng N` lines and do not change enabled state or listen channel.

@@ -69,7 +69,7 @@ DFU:
 
 ## Expected behavior after a good flash
 
-1. Power on: OLED shows the word Hello for 3 seconds, then goes dark. Ignore the button during Hello.
+1. Power on: the breadboard LED flashes three times (100 ms on, 100 ms off each time). Then the OLED shows the word Hello for 3 seconds and goes dark. Ignore the button during the boot flash and Hello.
 2. First button press: C4, 1 s (LED on), 2 s rest (LED off), E4, rest, G4. Default saw sound at volume 0.4. OLED is a rolling oscilloscope while that runs, then a condensed patch card. Extra presses during the sequence are ignored.
 3. Later presses: new random patch, same C-E-G, scope, then a new card. Random volume is 0.2 to 1.0, so it can get louder.
 
