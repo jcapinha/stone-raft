@@ -73,8 +73,8 @@ DFU:
 ## Expected behavior after a good flash
 
 1. Power on: the breadboard LED flashes three times (100 ms on, 100 ms off each time). Then the OLED shows the word Hello for 3 seconds and goes dark. Ignore the button during the boot flash and Hello.
-2. First button press: C4, 1 s (LED on), 2 s rest (LED off), E4, rest, G4. Default saw sound at volume 1.0. OLED is a rolling oscilloscope while that runs, then a condensed patch card. Extra presses during the sequence are ignored.
-3. Later presses: new random patch at volume 1.0, same C-E-G, scope, then a new card.
+2. First button press: C4, 1 s (LED on), 2 s rest (LED off), E4, rest, G4. Default saw sound at volume 1.0. The OLED stays dark. Extra presses during the sequence are ignored.
+3. Later presses: new random patch at volume 1.0, same C-E-G. Screen stays dark.
 
 ## If something is wrong
 

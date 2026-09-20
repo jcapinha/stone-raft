@@ -20,9 +20,11 @@ Closed doors. Do not re-propose these unless the author explicitly reopens them 
 - **Runtime path discovery for ./play (`wslpath`)** — rejected; the local script hard-codes `\\wsl$\Ubuntu\home\capinha\audio_experiments\stone-raft`.
 - **Separate destination list for LFOs** — abandoned. LFOs share `AssignableDest` with the assignable envelope.
 - **Glued LFO tokens (`lfo1`)** — parser requires `lfo 1` with a space, matching `eng 2`.
-- **Unmasked SPI4 during scope OLED flushes** — tried; I2C corrupts and the display stops updating. Every blocking flush masks SPI4.
+- **Unmasked SPI4 during blocking OLED flushes** — tried; I2C corrupts and the display stops updating. Every blocking flush masks SPI4.
 - **Enlarging the audio DMA buffer to absorb OLED stalls** — rejected; adds latency and does not fix I2C mid-transfer corruption.
 - **On-screen `AUDIO STALL` during scope** — rejected; false positives while OLED masking pauses sample pushes, and the message caused visible flashing.
-- **Min/max scope columns (Phase 4)** — deferred; current scope is good enough for bring-up. Reopen only if smoother refresh is solved first.
+- **Live rolling scope on the Daisy while notes sound** — blocking I2C plus SPI4 mask chopped audio.
+- **Condensed patch card on the Daisy via a full-frame blocking I2C flush that pauses audio** — reopen only with a path that does not pause audio, or with another microcontroller.
+- **Min/max scope columns (Phase 4)** — closed with live Daisy scope. Reopen only with a display path that does not pause audio.
 - **Shared MASTER volume pot on the panel** — dropped. Loudness is per-engine LEVEL next to voice pick. Mixer has no extra mix-wide scale for now.
 - **Dual-lane front panel** — dropped as the target. One strip of pots, switch engines 1–4. Two engines at once on the panel made the box too wide and doubled ADC count.

@@ -16,19 +16,19 @@
 //!
 //! Boot flashes the breadboard LED three times. OLED uses blocking I2C at 400 kHz
 //! with a 200 ms timeout so a missing screen cannot freeze the button. Hello is
-//! drawn before audio starts. Volume is 1.0 on first press and after `random`.
-//! Each press plays C4-E4-G4 with the LED on during each 1 s gate. Later
-//! presses run `random`, then the same arpeggio. The OLED is
-//! a rolling scope while notes sound, then a condensed patch card. Audio runs on
-//! an interrupt executor; SPI4 is masked during each blocking OLED transfer so
-//! I2C is not cut off mid-frame. Scope redraws the middle band each frame.
+//! drawn, held for 3 s, then the screen sleeps, all before audio starts. After
+//! that the Seed does not talk to the OLED. Volume is 1.0 on first press and
+//! after `random`. Each press plays C4-E4-G4 with the LED on during each 1 s
+//! gate. Later presses run `random`, then the same arpeggio. Audio runs on an
+//! interrupt executor. SPI4 is masked during blocking OLED transfers so I2C is
+//! not cut off mid-frame; those transfers only run before the codec starts.
 //! Recoverable DMA overruns yield, then refill.
 
-use core::fmt::Write;
 use core::slice;
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
-use daisy_embassy::audio::{AudioIrqs, AudioPeripherals, Fs, HALF_DMA_BUFFER_LENGTH};
+use daisy_embassy::audio::{
+    AudioIrqs, AudioPeripherals, DMA_BUFFER_LENGTH, Fs, HALF_DMA_BUFFER_LENGTH,
+};
 use daisy_embassy::hal::gpio::{Input, Level, Output, Pull, Speed};
 use daisy_embassy::hal::i2c::I2c;
 use daisy_embassy::hal::interrupt::{self, InterruptExt, Priority};
@@ -39,17 +39,13 @@ use daisy_embassy::{hal, new_daisy_board};
 use defmt::{info, unwrap, warn};
 use embassy_executor::{InterruptExecutor, Spawner};
 use embassy_time::{Duration, Instant, Timer};
+use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::mono_font::ascii::FONT_5X8;
-use embedded_graphics::mono_font::{MonoTextStyle, MonoTextStyleBuilder};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{Line, PrimitiveStyle};
 use embedded_graphics::text::{Baseline, Text};
-use engine::{
-    AssignableDest, EngineParams, InstanceEvent, Mixer, MixerEvent, patch_events, random_patch,
-};
+use engine::{InstanceEvent, Mixer, MixerEvent, patch_events, random_patch};
 use grounded::uninit::GroundedArrayCell;
-use heapless::String;
 use heapless::spsc::{Consumer, Producer, Queue};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -67,34 +63,12 @@ const ENGINE_INSTANCE: u8 = 1;
 const NOTES: [u8; 3] = [60, 64, 67];
 const GATE_MS: u64 = 1_000;
 const REST_MS: u64 = 2_000;
-const RELEASE_MS: u64 = 300;
 const HELLO_MS: u64 = 3_000;
 const OLED_INIT_TIMEOUT_MS: u64 = 200;
 const BOOT_FLASH_MS: u64 = 100;
 const DEBOUNCE_MS: u64 = 30;
 const POLL_MS: u64 = 10;
-const SCOPE_UI_YIELD_MS: u64 = 8;
-const SCOPE_MIN_FRAME_MS: u64 = 33;
-const SCOPE_TOP: i32 = 12;
-const SCOPE_BOTTOM: i32 = 52;
-const SCOPE_MID_Y: i32 = (SCOPE_TOP + SCOPE_BOTTOM) / 2;
-const SCOPE_FPS_LABEL_MS: u64 = 500;
-const SCOPE_LEN: usize = 128;
-const SCOPE_DOWNSAMPLE: usize = 8;
-const SCOPE_MEAN_DEVIATION_HEIGHT: f32 = 14.0;
-const SCOPE_SILENCE_THRESHOLD: f32 = 0.0005;
 const EVENT_QUEUE_CAP: usize = 64;
-const AUDIO_FRAMES_PER_BLOCK: usize = HALF_DMA_BUFFER_LENGTH / 2;
-const SCOPE_SAMPLES_PER_AUDIO_BLOCK: usize = AUDIO_FRAMES_PER_BLOCK / SCOPE_DOWNSAMPLE;
-const AUDIO_DMA_BUFFER_LENGTH: usize = 16_384;
-
-#[repr(u8)]
-#[derive(Clone, Copy)]
-enum AudioState {
-    Starting = 0,
-    Running = 1,
-    InitError = 2,
-}
 
 type OledI2c = I2c<'static, daisy_embassy::hal::mode::Blocking, i2c::mode::Master>;
 type OledDisplay = Ssd1306<
@@ -106,54 +80,14 @@ type OledDisplay = Ssd1306<
 static MIXER: StaticCell<Mixer> = StaticCell::new();
 static EVENT_QUEUE: StaticCell<Queue<MixerEvent, EVENT_QUEUE_CAP>> = StaticCell::new();
 static AUDIO_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
-static AUDIO_STATE: AtomicU8 = AtomicU8::new(AudioState::Starting as u8);
 #[unsafe(link_section = ".sram1_bss")]
-static AUDIO_TX_BUFFER: GroundedArrayCell<u32, AUDIO_DMA_BUFFER_LENGTH> =
-    GroundedArrayCell::uninit();
+static AUDIO_TX_BUFFER: GroundedArrayCell<u32, DMA_BUFFER_LENGTH> = GroundedArrayCell::uninit();
 
 #[cortex_m_rt::interrupt]
 unsafe fn SPI4() {
     unsafe {
         AUDIO_EXECUTOR.on_interrupt();
     }
-}
-
-struct ScopeBuffer {
-    samples: [AtomicU32; SCOPE_LEN],
-    write: AtomicUsize,
-}
-
-impl ScopeBuffer {
-    const fn new() -> Self {
-        const ZERO: AtomicU32 = AtomicU32::new(0);
-        Self {
-            samples: [ZERO; SCOPE_LEN],
-            write: AtomicUsize::new(0),
-        }
-    }
-
-    fn push(&self, sample: f32) {
-        let index = self.write.load(Ordering::Relaxed);
-        self.samples[index].store(sample.to_bits(), Ordering::Relaxed);
-        self.write.store((index + 1) % SCOPE_LEN, Ordering::Release);
-    }
-
-    fn snapshot(&self) -> [f32; SCOPE_LEN] {
-        let write = self.write.load(Ordering::Acquire);
-        let mut out = [0.0; SCOPE_LEN];
-        for (i, sample) in out.iter_mut().enumerate() {
-            let index = (write + i) % SCOPE_LEN;
-            *sample = f32::from_bits(self.samples[index].load(Ordering::Relaxed));
-        }
-        out
-    }
-}
-
-static SCOPE: ScopeBuffer = ScopeBuffer::new();
-
-struct PatchShadow {
-    params: EngineParams,
-    volume: f32,
 }
 
 #[embassy_executor::main]
@@ -174,7 +108,12 @@ async fn main(_spawner: Spawner) {
     let mut display = init_oled(i2c);
     if let Some(display) = display.as_mut() {
         show_hello(display);
+        Timer::after_millis(HELLO_MS).await;
+        let _ = display.clear(BinaryColor::Off);
+        oled_flush(display);
+        oled_set_on(display, false);
     }
+    drop(display);
 
     let queue = EVENT_QUEUE.init(Queue::new());
     let (producer, consumer) = queue.split();
@@ -183,7 +122,7 @@ async fn main(_spawner: Spawner) {
     let audio_spawner = AUDIO_EXECUTOR.start(interrupt::SPI4);
     audio_spawner.spawn(unwrap!(audio_loop(board.audio_peripherals, consumer)));
 
-    ui_loop(display, button, led, producer).await;
+    ui_loop(button, led, producer).await;
 }
 
 async fn boot_flash(led: &mut Output<'static>) {
@@ -209,38 +148,25 @@ async fn audio_loop(audio: AudioPeripherals<'static>, mut consumer: Consumer<'st
     let mut write_buffer = [0; HALF_DMA_BUFFER_LENGTH];
     Timer::after_millis(2).await;
     if output.write(&write_buffer).await.is_err() {
-        AUDIO_STATE.store(AudioState::InitError as u8, Ordering::Release);
         warn!("audio start failed");
         loop {
             Timer::after_millis(1_000).await;
         }
     }
 
-    AUDIO_STATE.store(AudioState::Running as u8, Ordering::Release);
     loop {
         while let Some(event) = consumer.dequeue() {
             mixer.apply(event);
         }
-        let mut scope_samples = [0.0; SCOPE_SAMPLES_PER_AUDIO_BLOCK];
-        for (frame, chunk) in write_buffer.chunks_exact_mut(2).enumerate() {
+        for chunk in write_buffer.chunks_exact_mut(2) {
             let sample = mixer.next_sample();
             let bits = f32_to_u24(sample);
             chunk[0] = bits;
             chunk[1] = bits;
-            if (frame + 1) % SCOPE_DOWNSAMPLE == 0 {
-                scope_samples[frame / SCOPE_DOWNSAMPLE] = sample;
-            }
         }
-        match output.write(&write_buffer).await {
-            Ok(()) => {
-                for sample in scope_samples {
-                    SCOPE.push(sample);
-                }
-            }
-            Err(_) => {
-                warn!("audio output overrun; ring reset");
-                Timer::after_millis(1).await;
-            }
+        if output.write(&write_buffer).await.is_err() {
+            warn!("audio output overrun; ring reset");
+            Timer::after_millis(1).await;
         }
     }
 }
@@ -318,41 +244,19 @@ fn oled_set_on(display: &mut OledDisplay, on: bool) {
 }
 
 async fn ui_loop(
-    mut display: Option<OledDisplay>,
     button: Input<'static>,
     mut led: Output<'static>,
     mut producer: Producer<'static, MixerEvent>,
 ) {
-    if let Some(display) = display.as_mut() {
-        Timer::after_millis(HELLO_MS).await;
-        let _ = display.clear(BinaryColor::Off);
-        oled_flush(display);
-        oled_set_on(display, false);
-    }
-
-    let mut shadow = PatchShadow {
-        params: EngineParams::default(),
-        volume: START_VOLUME,
-    };
     let mut first_press = true;
 
     loop {
         wait_for_press(&button).await;
         if !first_press {
-            apply_random(&mut producer, &mut shadow);
+            apply_random(&mut producer);
         }
         first_press = false;
-
-        if let Some(display) = display.as_mut() {
-            oled_set_on(display, true);
-            let _ = display.clear(BinaryColor::Off);
-            oled_flush(display);
-        }
-        play_arpeggio(&mut producer, &mut led, display.as_mut()).await;
-        Timer::after_millis(RELEASE_MS).await;
-        if let Some(display) = display.as_mut() {
-            show_patch_card(display, &shadow);
-        }
+        play_arpeggio(&mut producer, &mut led).await;
         wait_for_release(&button).await;
     }
 }
@@ -376,14 +280,16 @@ fn init_oled(i2c: OledI2c) -> Option<OledDisplay> {
 }
 
 fn show_hello(display: &mut OledDisplay) {
-    draw_message(display, "Hello", Point::new(50, 28));
+    let _ = display.clear(BinaryColor::Off);
+    let style = MonoTextStyleBuilder::new()
+        .font(&FONT_5X8)
+        .text_color(BinaryColor::On)
+        .build();
+    let _ = Text::with_baseline("Hello", Point::new(50, 28), style, Baseline::Top).draw(display);
+    oled_flush(display);
 }
 
-async fn play_arpeggio(
-    producer: &mut Producer<'static, MixerEvent>,
-    led: &mut Output<'static>,
-    mut display: Option<&mut OledDisplay>,
-) {
+async fn play_arpeggio(producer: &mut Producer<'static, MixerEvent>, led: &mut Output<'static>) {
     let last = NOTES.len() - 1;
     for (index, note) in NOTES.iter().copied().enumerate() {
         led.set_high();
@@ -395,7 +301,7 @@ async fn play_arpeggio(
                 velocity: NOTE_VELOCITY,
             },
         );
-        scope_for(GATE_MS, display.as_deref_mut()).await;
+        Timer::after_millis(GATE_MS).await;
         enqueue(
             producer,
             MixerEvent::MidiNoteOff {
@@ -405,195 +311,14 @@ async fn play_arpeggio(
         );
         led.set_low();
         if index != last {
-            scope_for(REST_MS, display.as_deref_mut()).await;
+            Timer::after_millis(REST_MS).await;
         }
     }
 }
 
-async fn scope_for(ms: u64, mut display: Option<&mut OledDisplay>) {
-    let deadline = Instant::now() + Duration::from_millis(ms);
-    let mut last_draw = Instant::now();
-    let mut fps_frames = 0u32;
-    let mut fps = 0u32;
-    let mut fps_window = Instant::now();
-    while Instant::now() < deadline {
-        if let Some(display) = display.as_deref_mut() {
-            if Instant::now()
-                .saturating_duration_since(last_draw)
-                .as_millis()
-                < SCOPE_MIN_FRAME_MS
-            {
-                Timer::after_millis(SCOPE_UI_YIELD_MS).await;
-                continue;
-            }
-            last_draw = Instant::now();
-            fps_frames += 1;
-            if Instant::now()
-                .saturating_duration_since(fps_window)
-                .as_millis()
-                >= SCOPE_FPS_LABEL_MS
-            {
-                let elapsed_ms = Instant::now()
-                    .saturating_duration_since(fps_window)
-                    .as_millis()
-                    .max(1) as u32;
-                fps = fps_frames.saturating_mul(1_000) / elapsed_ms;
-                fps_frames = 0;
-                fps_window = Instant::now();
-            }
-            draw_scope(display, fps);
-        }
-        Timer::after_millis(SCOPE_UI_YIELD_MS).await;
-    }
-}
-
-fn audio_state() -> AudioState {
-    match AUDIO_STATE.load(Ordering::Acquire) {
-        value if value == AudioState::Running as u8 => AudioState::Running,
-        value if value == AudioState::InitError as u8 => AudioState::InitError,
-        _ => AudioState::Starting,
-    }
-}
-
-fn draw_scope(display: &mut OledDisplay, fps: u32) {
-    match audio_state() {
-        AudioState::Starting => {
-            show_scope_status(display, "AUDIO START");
-            return;
-        }
-        AudioState::InitError => {
-            show_scope_status(display, "AUDIO INIT ERR");
-            return;
-        }
-        AudioState::Running => {}
-    }
-
-    let samples = SCOPE.snapshot();
-    let mean = samples.iter().sum::<f32>() / SCOPE_LEN as f32;
-    let mean_deviation = samples
-        .iter()
-        .map(|sample| (sample - mean).abs())
-        .sum::<f32>()
-        / SCOPE_LEN as f32;
-    let scale = if mean_deviation >= SCOPE_SILENCE_THRESHOLD {
-        SCOPE_MEAN_DEVIATION_HEIGHT / mean_deviation
-    } else {
-        0.0
-    };
-
-    display.clear_buffer();
-    let style = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    for x in 0..SCOPE_LEN - 1 {
-        let y0 = sample_to_scope_y(samples[x] - mean, scale);
-        let y1 = sample_to_scope_y(samples[x + 1] - mean, scale);
-        let _ = Line::new(Point::new(x as i32, y0), Point::new((x + 1) as i32, y1))
-            .into_styled(style)
-            .draw(display);
-    }
-    draw_scope_fps(display, fps);
-    oled_flush(display);
-}
-
-fn sample_to_scope_y(sample: f32, scale: f32) -> i32 {
-    let y = SCOPE_MID_Y as f32 - sample * scale;
-    y.clamp(SCOPE_TOP as f32, SCOPE_BOTTOM as f32) as i32
-}
-
-fn draw_scope_fps(display: &mut OledDisplay, fps: u32) {
-    let mut label = String::<8>::new();
-    let _ = write!(label, "{fps}");
-    let _ = Text::with_baseline(
-        label.as_str(),
-        Point::new(110, 0),
-        oled_text_style(),
-        Baseline::Top,
-    )
-    .draw(display);
-}
-
-fn show_scope_status(display: &mut OledDisplay, message: &str) {
-    let _ = display.clear(BinaryColor::Off);
-    let _ = Text::with_baseline(message, Point::new(31, 28), oled_text_style(), Baseline::Top)
-        .draw(display);
-    oled_flush(display);
-}
-
-fn show_patch_card(display: &mut OledDisplay, shadow: &PatchShadow) {
-    let _ = display.clear(BinaryColor::Off);
-    let style = oled_text_style();
-    for (i, line) in patch_card_lines(shadow).iter().enumerate() {
-        let _ = Text::with_baseline(
-            line.as_str(),
-            Point::new(0, i as i32 * 8),
-            style,
-            Baseline::Top,
-        )
-        .draw(display);
-    }
-    oled_flush(display);
-}
-
-fn draw_message(display: &mut OledDisplay, message: &str, position: Point) {
-    let _ = display.clear(BinaryColor::Off);
-    let _ = Text::with_baseline(message, position, oled_text_style(), Baseline::Top).draw(display);
-    oled_flush(display);
-}
-
-fn oled_text_style() -> MonoTextStyle<'static, BinaryColor> {
-    MonoTextStyleBuilder::new()
-        .font(&FONT_5X8)
-        .text_color(BinaryColor::On)
-        .build()
-}
-
-fn patch_card_lines(shadow: &PatchShadow) -> [String<24>; 8] {
-    let p = &shadow.params;
-    let mut lines = [const { String::new() }; 8];
-    let _ = write!(lines[0], "v{:.2} saw{:.2}", shadow.volume, p.saw_vol);
-    let _ = write!(lines[1], "sq{:.2} tri{:.2}", p.square_vol, p.triangle_vol);
-    let _ = write!(lines[2], "sin{:.2} sub{:.2}", p.sine_vol, p.sub_vol);
-    let _ = write!(lines[3], "pw{:.2} cut{:.0}", p.pulse_width, p.cutoff_hz);
-    let _ = write!(
-        lines[4],
-        "res{:.2} a{:.0}/{:.0}",
-        p.resonance, p.amp_env.attack_ms, p.amp_env.decay_ms
-    );
-    let _ = write!(
-        lines[5],
-        "s{:.2} r{:.0}",
-        p.amp_env.sustain, p.amp_env.release_ms
-    );
-    let _ = write!(
-        lines[6],
-        "f{:.2} as {}",
-        p.filter_env_amount,
-        dest_name(p.assignable_dest)
-    );
-    let _ = write!(
-        lines[7],
-        "L1 {} L2 {}",
-        dest_name(p.lfos[0].dest),
-        dest_name(p.lfos[1].dest)
-    );
-    lines
-}
-
-fn dest_name(dest: AssignableDest) -> &'static str {
-    match dest {
-        AssignableDest::Off => "off",
-        AssignableDest::Resonance => "res",
-        AssignableDest::Pitch => "pitch",
-        AssignableDest::Cutoff => "cut",
-        AssignableDest::PulseWidth => "pw",
-        AssignableDest::Amp => "amp",
-    }
-}
-
-fn apply_random(producer: &mut Producer<'static, MixerEvent>, shadow: &mut PatchShadow) {
+fn apply_random(producer: &mut Producer<'static, MixerEvent>) {
     let mut rng = SmallRng::seed_from_u64(Instant::now().as_ticks());
     let (params, _) = random_patch(&mut rng);
-    shadow.params = params;
-    shadow.volume = START_VOLUME;
     for event in patch_events(ENGINE_INSTANCE, &params, START_VOLUME).as_slice() {
         enqueue(producer, *event);
     }
