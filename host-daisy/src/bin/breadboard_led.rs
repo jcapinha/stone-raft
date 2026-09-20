@@ -19,25 +19,19 @@
 //! drawn, held for 3 s, then the screen sleeps, all before audio starts. After
 //! that the Seed does not talk to the OLED. Volume is 1.0 on first press and
 //! after `random`. Each press plays C4-E4-G4 with the LED on during each 1 s
-//! gate. Later presses run `random`, then the same arpeggio. Audio runs on an
-//! interrupt executor. SPI4 is masked during blocking OLED transfers so I2C is
-//! not cut off mid-frame; those transfers only run before the codec starts.
-//! Recoverable DMA overruns yield, then refill.
+//! gate. Later presses run `random`, then the same arpeggio. Audio uses the
+//! daisy-embassy Seed 3 callback (TX and RX paced to the codec). An SAI error
+//! stops audio and changes the LED to a continuous rapid blink until reset.
 
-use core::slice;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use daisy_embassy::audio::{
-    AudioIrqs, AudioPeripherals, DMA_BUFFER_LENGTH, Fs, HALF_DMA_BUFFER_LENGTH,
-};
+use daisy_embassy::audio::AudioPeripherals;
 use daisy_embassy::hal::gpio::{Input, Level, Output, Pull, Speed};
-use daisy_embassy::hal::i2c::I2c;
-use daisy_embassy::hal::interrupt::{self, InterruptExt, Priority};
-use daisy_embassy::hal::sai::{self, Sai};
+use daisy_embassy::hal::i2c::{self, I2c};
 use daisy_embassy::hal::time::Hertz;
-use daisy_embassy::hal::{i2c, peripherals};
 use daisy_embassy::{hal, new_daisy_board};
 use defmt::{info, unwrap, warn};
-use embassy_executor::{InterruptExecutor, Spawner};
+use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::mono_font::ascii::FONT_5X8;
@@ -45,7 +39,6 @@ use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::{Baseline, Text};
 use engine::{InstanceEvent, Mixer, MixerEvent, patch_events, random_patch};
-use grounded::uninit::GroundedArrayCell;
 use heapless::spsc::{Consumer, Producer, Queue};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -66,6 +59,7 @@ const REST_MS: u64 = 2_000;
 const HELLO_MS: u64 = 3_000;
 const OLED_INIT_TIMEOUT_MS: u64 = 200;
 const BOOT_FLASH_MS: u64 = 100;
+const ERROR_BLINK_MS: u64 = 75;
 const DEBOUNCE_MS: u64 = 30;
 const POLL_MS: u64 = 10;
 const EVENT_QUEUE_CAP: usize = 64;
@@ -79,19 +73,11 @@ type OledDisplay = Ssd1306<
 
 static MIXER: StaticCell<Mixer> = StaticCell::new();
 static EVENT_QUEUE: StaticCell<Queue<MixerEvent, EVENT_QUEUE_CAP>> = StaticCell::new();
-static AUDIO_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
-#[unsafe(link_section = ".sram1_bss")]
-static AUDIO_TX_BUFFER: GroundedArrayCell<u32, DMA_BUFFER_LENGTH> = GroundedArrayCell::uninit();
-
-#[cortex_m_rt::interrupt]
-unsafe fn SPI4() {
-    unsafe {
-        AUDIO_EXECUTOR.on_interrupt();
-    }
-}
+static AUDIO_ERROR: AtomicBool = AtomicBool::new(false);
+static GATE_LED_ON: AtomicBool = AtomicBool::new(false);
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     let p = hal::init(daisy_embassy::default_rcc());
     let board = new_daisy_board!(p);
 
@@ -108,21 +94,22 @@ async fn main(_spawner: Spawner) {
     let mut display = init_oled(i2c);
     if let Some(display) = display.as_mut() {
         show_hello(display);
+    }
+
+    let queue = EVENT_QUEUE.init(Queue::new());
+    let (producer, consumer) = queue.split();
+
+    if let Some(display) = display.as_mut() {
         Timer::after_millis(HELLO_MS).await;
         let _ = display.clear(BinaryColor::Off);
         oled_flush(display);
         oled_set_on(display, false);
     }
-    drop(display);
 
-    let queue = EVENT_QUEUE.init(Queue::new());
-    let (producer, consumer) = queue.split();
+    spawner.spawn(unwrap!(audio_loop(board.audio_peripherals, consumer)));
+    spawner.spawn(unwrap!(status_led_loop(led)));
 
-    interrupt::SPI4.set_priority(Priority::P1);
-    let audio_spawner = AUDIO_EXECUTOR.start(interrupt::SPI4);
-    audio_spawner.spawn(unwrap!(audio_loop(board.audio_peripherals, consumer)));
-
-    ui_loop(button, led, producer).await;
+    ui_loop(button, producer).await;
 }
 
 async fn boot_flash(led: &mut Output<'static>) {
@@ -144,110 +131,57 @@ async fn audio_loop(audio: AudioPeripherals<'static>, mut consumer: Consumer<'st
         },
     });
 
-    let mut output = prepare_audio_output(audio);
-    let mut write_buffer = [0; HALF_DMA_BUFFER_LENGTH];
-    Timer::after_millis(2).await;
-    if output.write(&write_buffer).await.is_err() {
-        warn!("audio start failed");
-        loop {
-            Timer::after_millis(1_000).await;
-        }
-    }
-
-    loop {
-        while let Some(event) = consumer.dequeue() {
-            mixer.apply(event);
-        }
-        for chunk in write_buffer.chunks_exact_mut(2) {
-            let sample = mixer.next_sample();
-            let bits = f32_to_u24(sample);
-            chunk[0] = bits;
-            chunk[1] = bits;
-        }
-        if output.write(&write_buffer).await.is_err() {
-            warn!("audio output overrun; ring reset");
-            Timer::after_millis(1).await;
-        }
-    }
-}
-
-fn prepare_audio_output(audio: AudioPeripherals<'static>) -> Sai<'static, peripherals::SAI1, u32> {
-    let AudioPeripherals {
-        codec_pins,
-        sai1,
-        dma1_ch0,
-        ..
-    } = audio;
-    // SAFETY: this is the single initialization of the static DMA buffer, and
-    // SAI owns the returned slice for the rest of the firmware's lifetime.
-    let tx_buffer = unsafe {
-        AUDIO_TX_BUFFER.initialize_all_copied(0);
-        let (pointer, length) = AUDIO_TX_BUFFER.get_ptr_len();
-        slice::from_raw_parts_mut(pointer, length)
+    let idle = audio.prepare_interface(Default::default()).await;
+    let Ok(mut interface) = idle.start_interface().await else {
+        AUDIO_ERROR.store(true, Ordering::Relaxed);
+        return;
     };
-    let (tx, _rx) = sai::split_subblocks(sai1);
-
-    let mut config = sai::Config::default();
-    config.mode = sai::Mode::Master;
-    config.tx_rx = sai::TxRx::Transmitter;
-    config.sync_output = true;
-    config.clock_strobe = sai::ClockStrobe::Falling;
-    config.master_clock_divider = Fs::Fs48000.into_clock_divider();
-    config.stereo_mono = sai::StereoMono::Stereo;
-    config.data_size = sai::DataSize::Data32;
-    config.bit_order = sai::BitOrder::MsbFirst;
-    config.frame_sync_polarity = sai::FrameSyncPolarity::ActiveHigh;
-    config.frame_sync_offset = sai::FrameSyncOffset::OnFirstBit;
-    config.frame_length = 64;
-    config.frame_sync_active_level_length = sai::word::U7(32);
-    config.fifo_threshold = sai::FifoThreshold::Quarter;
-
-    Sai::new_asynchronous_with_mclk(
-        tx,
-        codec_pins.SCK_A,
-        codec_pins.SD_A,
-        codec_pins.FS_A,
-        codec_pins.MCLK_A,
-        dma1_ch0,
-        tx_buffer,
-        AudioIrqs,
-        config,
-    )
+    if interface
+        .start_callback(|_input, output| {
+            while let Some(event) = consumer.dequeue() {
+                mixer.apply(event);
+            }
+            for chunk in output.chunks_exact_mut(2) {
+                let bits = f32_to_u24(mixer.next_sample());
+                chunk[0] = bits;
+                chunk[1] = bits;
+            }
+        })
+        .await
+        .is_err()
+    {
+        AUDIO_ERROR.store(true, Ordering::Relaxed);
+    }
 }
 
-fn with_oled_bus_masked<R>(f: impl FnOnce() -> R) -> R {
-    let audio_was_running = interrupt::SPI4.is_enabled();
-    if audio_was_running {
-        interrupt::SPI4.disable();
-    }
-    let result = f();
-    if audio_was_running {
-        // SAFETY: SPI4 was already enabled for AUDIO_EXECUTOR. Masking it only
-        // around blocking OLED transfers keeps I2C from being cut off mid-frame.
-        unsafe {
-            interrupt::SPI4.enable();
+#[embassy_executor::task]
+async fn status_led_loop(mut led: Output<'static>) {
+    loop {
+        if AUDIO_ERROR.load(Ordering::Relaxed) {
+            led.set_high();
+            Timer::after_millis(ERROR_BLINK_MS).await;
+            led.set_low();
+            Timer::after_millis(ERROR_BLINK_MS).await;
+        } else {
+            if GATE_LED_ON.load(Ordering::Relaxed) {
+                led.set_high();
+            } else {
+                led.set_low();
+            }
+            Timer::after_millis(POLL_MS).await;
         }
     }
-    result
 }
 
 fn oled_flush(display: &mut OledDisplay) {
-    with_oled_bus_masked(|| {
-        let _ = display.flush();
-    });
+    let _ = display.flush();
 }
 
 fn oled_set_on(display: &mut OledDisplay, on: bool) {
-    with_oled_bus_masked(|| {
-        let _ = display.set_display_on(on);
-    });
+    let _ = display.set_display_on(on);
 }
 
-async fn ui_loop(
-    button: Input<'static>,
-    mut led: Output<'static>,
-    mut producer: Producer<'static, MixerEvent>,
-) {
+async fn ui_loop(button: Input<'static>, mut producer: Producer<'static, MixerEvent>) {
     let mut first_press = true;
 
     loop {
@@ -256,7 +190,7 @@ async fn ui_loop(
             apply_random(&mut producer);
         }
         first_press = false;
-        play_arpeggio(&mut producer, &mut led).await;
+        play_arpeggio(&mut producer).await;
         wait_for_release(&button).await;
     }
 }
@@ -265,7 +199,7 @@ fn init_oled(i2c: OledI2c) -> Option<OledDisplay> {
     let interface = I2CDisplayInterface::new(i2c);
     let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
-    match with_oled_bus_masked(|| display.init()) {
+    match display.init() {
         Ok(()) => {
             info!("oled ready");
             let _ = display.clear(BinaryColor::Off);
@@ -289,10 +223,10 @@ fn show_hello(display: &mut OledDisplay) {
     oled_flush(display);
 }
 
-async fn play_arpeggio(producer: &mut Producer<'static, MixerEvent>, led: &mut Output<'static>) {
+async fn play_arpeggio(producer: &mut Producer<'static, MixerEvent>) {
     let last = NOTES.len() - 1;
     for (index, note) in NOTES.iter().copied().enumerate() {
-        led.set_high();
+        GATE_LED_ON.store(true, Ordering::Relaxed);
         enqueue(
             producer,
             MixerEvent::MidiNoteOn {
@@ -309,7 +243,7 @@ async fn play_arpeggio(producer: &mut Producer<'static, MixerEvent>, led: &mut O
                 note,
             },
         );
-        led.set_low();
+        GATE_LED_ON.store(false, Ordering::Relaxed);
         if index != last {
             Timer::after_millis(REST_MS).await;
         }

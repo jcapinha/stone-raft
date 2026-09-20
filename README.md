@@ -185,9 +185,40 @@ The device normally reports USB ID `0483:df11`. If Windows can see it but `dfu-u
 
 Confirm the double blink after flashing the firmware. If necessary, press RESET, and disconnect and reconnect USB power.
 
+## Daisy audio probe
+
+`audio-probe` separates codec/SAI transport problems from synth engine load. It uses the D15 button, D24 LED, and the normal audio outputs. It does not initialize the OLED.
+
+After the long boot flash, button presses select raw triangle, default saw, then the deterministic heavy patch with one, two, three, and four held voices. The sequence repeats after four voices. About two seconds after each press, the LED reports the peak callback load:
+
+- One blink: under 50% of the 32-frame callback budget.
+- Two blinks: 50-75%.
+- Three blinks: 75% or more.
+- Continuous rapid blink: audio stopped after an interface error; reset the board.
+
+PowerShell, from the WSL-backed repository:
+
+```powershell
+$env:CARGO_TARGET_DIR = "$env:USERPROFILE\stone-raft-target"
+$env:CARGO_INCREMENTAL = "0"
+cargo build -p host-daisy --bin audio-probe --target thumbv7em-none-eabihf --release
+cargo objcopy -p host-daisy --bin audio-probe --target thumbv7em-none-eabihf --release -- -O binary audio-probe.bin
+dfu-util -a 0 -s 0x08000000:leave -D audio-probe.bin
+```
+
+WSL:
+
+```bash
+cargo build -p host-daisy --bin audio-probe --target thumbv7em-none-eabihf --release
+cargo objcopy -p host-daisy --bin audio-probe --target thumbv7em-none-eabihf --release -- -O binary audio-probe.bin
+dfu-util -a 0 -s 0x08000000:leave -D audio-probe.bin
+```
+
+Before either flash command, hold BOOT, press and release RESET, then release BOOT. WSL also needs the DFU device attached with `usbipd`, as described in the one-time setup above. Always use `--release`.
+
 ## Daisy breadboard play
 
-`breadboard-led` runs the synth engine through the Seed 3 codec, plus a 0.96" I2C OLED and the breadboard button/LED. Boot flashes the LED three times. OLED uses blocking I2C at 400 kHz with a 200 ms timeout so a missing screen cannot freeze the button. Hello is drawn, stays for 3 seconds, then the screen sleeps, all before audio starts. After that the Seed does not talk to the OLED. Audio runs on a higher-priority interrupt executor. First button press plays C4, E4, G4 (1 s gate, 2 s rest) at volume 1.0. Later presses apply `random`, then replay, still at volume 1.0. The LED is on only during each 1 s gate.
+`breadboard-led` runs the synth engine through the Seed 3 codec, plus a 0.96" I2C OLED and the breadboard button/LED. Boot flashes the LED three times. OLED uses blocking I2C at 400 kHz with a 200 ms timeout so a missing screen cannot freeze the button. Hello is drawn, stays for 3 seconds, then the screen sleeps, all before audio starts. After that the Seed does not talk to the OLED. Audio uses the daisy-embassy Seed 3 callback. First button press plays C4, E4, G4 (1 s gate, 2 s rest) at volume 1.0. Later presses apply `random`, then replay, still at volume 1.0. The LED follows each 1 s gate. A continuous rapid blink means audio stopped after an interface error and the board needs a reset.
 
 Audio is line-level on Audio Out 1 and 2 (pins 18 and 19) and AGND (pin 20). Firmware copies the mono mix to both codec channels. A TRRS breakout plus 10 µF caps and 100 Ω resistors can drive headphones. OLED power is 3.3 V digital (pin 38) and GND (pin 40). Do not use analog 3.3 V on pin 21.
 

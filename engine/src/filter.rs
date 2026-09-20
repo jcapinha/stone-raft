@@ -7,6 +7,11 @@ use core::f32::consts::PI;
 pub struct Svf {
     ic1eq: f32,
     ic2eq: f32,
+    cached_cutoff: f32,
+    cached_res: f32,
+    a1: f32,
+    a2: f32,
+    a3: f32,
 }
 
 impl Svf {
@@ -14,6 +19,11 @@ impl Svf {
         Self {
             ic1eq: 0.0,
             ic2eq: 0.0,
+            cached_cutoff: f32::NAN,
+            cached_res: f32::NAN,
+            a1: 0.0,
+            a2: 0.0,
+            a3: 0.0,
         }
     }
 
@@ -34,19 +44,23 @@ impl Svf {
         let cutoff = cutoff_hz.clamp(20.0, nyquist * 0.99);
         let res = resonance.clamp(0.0, 1.0);
 
-        // Map resonance 0..1 into a useful Q range (0.5 .. ~20).
-        let q = 0.5 * libm::expf(res * 3.7);
-        let g = libm::tanf(PI * cutoff / sample_rate_hz);
-        let k = 1.0 / q;
+        if cutoff != self.cached_cutoff || res != self.cached_res {
+            // Map resonance 0..1 into a useful Q range (0.5 .. ~20).
+            let q = 0.5 * libm::expf(res * 3.7);
+            let g = libm::tanf(PI * cutoff / sample_rate_hz);
+            let k = 1.0 / q;
 
-        // Andy Simper / Cytomic linear trapezoidal SVF (lowpass = v2).
-        let a1 = 1.0 / (1.0 + g * (g + k));
-        let a2 = g * a1;
-        let a3 = g * a2;
+            // Andy Simper / Cytomic linear trapezoidal SVF (lowpass = v2).
+            self.a1 = 1.0 / (1.0 + g * (g + k));
+            self.a2 = g * self.a1;
+            self.a3 = g * self.a2;
+            self.cached_cutoff = cutoff;
+            self.cached_res = res;
+        }
 
         let v3 = input - self.ic2eq;
-        let v1 = a1 * self.ic1eq + a2 * v3;
-        let v2 = self.ic2eq + a2 * self.ic1eq + a3 * v3;
+        let v1 = self.a1 * self.ic1eq + self.a2 * v3;
+        let v2 = self.ic2eq + self.a2 * self.ic1eq + self.a3 * v3;
         self.ic1eq = 2.0 * v1 - self.ic1eq;
         self.ic2eq = 2.0 * v2 - self.ic2eq;
         v2

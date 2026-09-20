@@ -178,7 +178,11 @@ pub fn midi_note_to_hz(note: u8) -> f32 {
 }
 
 pub(crate) fn hz_times_octaves(hz: f32, octaves: f32) -> f32 {
-    hz * libm::powf(2.0, octaves)
+    if octaves == 0.0 {
+        hz
+    } else {
+        hz * libm::powf(2.0, octaves)
+    }
 }
 
 /// Live voice updates required after applying a parameter event.

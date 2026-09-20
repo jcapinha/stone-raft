@@ -160,10 +160,11 @@ impl Voice {
         );
         for (index, lfo) in self.lfos.iter_mut().enumerate() {
             let lfo_params = &params.lfos[index];
-            let level = lfo.next_level(lfo_params.rate_hz, lfo_params.wave);
-            if lfo_params.dest != AssignableDest::Off && lfo_params.amount != 0.0 {
-                add_assignable(&mut offsets, lfo_params.dest, level, lfo_params.amount);
+            if lfo_params.dest == AssignableDest::Off || lfo_params.amount == 0.0 {
+                continue;
             }
+            let level = lfo.next_level(lfo_params.rate_hz, lfo_params.wave);
+            add_assignable(&mut offsets, lfo_params.dest, level, lfo_params.amount);
         }
         offsets.cutoff_octaves += filter_octaves;
 

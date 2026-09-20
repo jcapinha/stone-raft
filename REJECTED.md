@@ -22,6 +22,8 @@ Closed doors. Do not re-propose these unless the author explicitly reopens them 
 - **Glued LFO tokens (`lfo1`)** — parser requires `lfo 1` with a space, matching `eng 2`.
 - **Unmasked SPI4 during blocking OLED flushes** — tried; I2C corrupts and the display stops updating. Every blocking flush masks SPI4.
 - **Enlarging the audio DMA buffer to absorb OLED stalls** — rejected; adds latency and does not fix I2C mid-transfer corruption.
+- **Shrinking Daisy audio DMA to the daisy-embassy default (128) while audio ran on the SPI4 interrupt executor** — Hello and the gate LED still ran, but no sound.
+- **Daisy audio on the SPI4 interrupt executor with a large TX ring** — the synth filled thousands of samples inside a high-priority interrupt, DMA overran, and notes chopped with or without the scope. Audio now shares the thread executor with the button loop.
 - **On-screen `AUDIO STALL` during scope** — rejected; false positives while OLED masking pauses sample pushes, and the message caused visible flashing.
 - **Live rolling scope on the Daisy while notes sound** — blocking I2C plus SPI4 mask chopped audio.
 - **Condensed patch card on the Daisy via a full-frame blocking I2C flush that pauses audio** — reopen only with a path that does not pause audio, or with another microcontroller.
