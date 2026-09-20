@@ -100,6 +100,16 @@ OLED plot of recent mixer samples while notes sound. Not a triggered lab oscillo
 **Condensed patch card**:
 Eight-line OLED summary of the current patch (volume, osc mix, filter, amp, a few dests). Not a full laptop `show` dump.
 
+**Panel lane**:
+The planned front panel is one strip of pots. A 1–4 selector chooses which engine that strip edits. Other engines can stay on and keep sounding; you just are not twiddling them at the same time.
+_Avoid_: channel strip (unless meaning MIDI channel)
+
+**Envelope bank**:
+One 3-way selector (amp, filter env, assignable env) plus four pots for attack, decay, sustain, and release on the selected envelope. Same “pick target, then tweak” pattern as engine pick. On the panel this bank sits under the oscillators (from sine rightward) and under the filter, as its own section.
+
+**Pickup**:
+Optional later pot rule: after `random` or an engine switch, turning a knob does nothing until it passes the stored param value, then it follows. Not required. Encoders do not need this.
+
 ## Decisions
 
 **Rust as the implementation language**
@@ -178,3 +188,6 @@ If there is exactly one output device or one MIDI input port, the host uses it a
 
 **Personal WSL play launcher**
 A gitignored `play` file at the repo root. From WSL, `./play` opens a new Windows PowerShell 5.1 window and returns immediately. That window uses the documented Windows play recipe (`CARGO_TARGET_DIR` on the Windows drive, `CARGO_INCREMENTAL=0`, `cargo run -p host-windows`) and stays open after the host exits. The Windows `cd` path is hard-coded to `\\wsl$\Ubuntu\home\capinha\audio_experiments\stone-raft`. Not a committed project tool.
+
+**Front panel direction (planning, not firmware)**
+One control strip. Engine 1–4 selects which instance the pots edit; other engines can stay enabled. Layout from the cardboard mockup: VOICE (pick, LEVEL, ON) with LFO under it; OSC (saw, square, triangle, sine, then sub and pulse width); FILTER (cutoff, res, EG AMT) to the right of osc; ENVELOPE under osc+filter, starting under sine, as its own section. Hold-to-random, ENV LINK, optional status OLED on the right. No second lane. No shared MASTER pot. Pickup after `random` or engine switch is optional later. Status need is dest / on / listen channel, not a Minilogue-class scope. Mockup: `canvases/synth-front-panel.canvas.tsx` in the Cursor project folder.

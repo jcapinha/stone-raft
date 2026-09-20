@@ -15,8 +15,9 @@
 //!
 //! Boot flashes the breadboard LED three times. OLED uses blocking I2C at 400 kHz
 //! with a 200 ms timeout so a missing screen cannot freeze the button. Hello is
-//! drawn before audio starts. Each press plays C4-E4-G4 with the LED on during
-//! each 1 s gate. Later presses run `random`, then the same arpeggio. The OLED is
+//! drawn before audio starts. Volume is 1.0 on first press and after `random`.
+//! Each press plays C4-E4-G4 with the LED on during each 1 s gate. Later
+//! presses run `random`, then the same arpeggio. The OLED is
 //! a rolling scope while notes sound, then a condensed patch card. Audio runs on
 //! an interrupt executor; SPI4 is masked during each blocking OLED transfer so
 //! I2C is not cut off mid-frame. Scope redraws the middle band each frame.
@@ -58,7 +59,7 @@ use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 const SAMPLE_RATE_HZ: f32 = 48_000.0;
-const START_VOLUME: f32 = 0.4;
+const START_VOLUME: f32 = 1.0;
 const NOTE_VELOCITY: u8 = 100;
 const LISTEN_CHANNEL: u8 = 1;
 const ENGINE_INSTANCE: u8 = 1;
@@ -589,10 +590,10 @@ fn dest_name(dest: AssignableDest) -> &'static str {
 
 fn apply_random(producer: &mut Producer<'static, MixerEvent>, shadow: &mut PatchShadow) {
     let mut rng = SmallRng::seed_from_u64(Instant::now().as_ticks());
-    let (params, volume) = random_patch(&mut rng);
+    let (params, _) = random_patch(&mut rng);
     shadow.params = params;
-    shadow.volume = volume;
-    for event in patch_events(ENGINE_INSTANCE, &params, volume).as_slice() {
+    shadow.volume = START_VOLUME;
+    for event in patch_events(ENGINE_INSTANCE, &params, START_VOLUME).as_slice() {
         enqueue(producer, *event);
     }
 }

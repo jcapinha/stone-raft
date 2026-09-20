@@ -70,8 +70,8 @@ DFU:
 ## Expected behavior after a good flash
 
 1. Power on: the breadboard LED flashes three times (100 ms on, 100 ms off each time). Then the OLED shows the word Hello for 3 seconds and goes dark. Ignore the button during the boot flash and Hello.
-2. First button press: C4, 1 s (LED on), 2 s rest (LED off), E4, rest, G4. Default saw sound at volume 0.4. OLED is a rolling oscilloscope while that runs, then a condensed patch card. Extra presses during the sequence are ignored.
-3. Later presses: new random patch, same C-E-G, scope, then a new card. Random volume is 0.2 to 1.0, so it can get louder.
+2. First button press: C4, 1 s (LED on), 2 s rest (LED off), E4, rest, G4. Default saw sound at volume 1.0. OLED is a rolling oscilloscope while that runs, then a condensed patch card. Extra presses during the sequence are ignored.
+3. Later presses: new random patch at volume 1.0, same C-E-G, scope, then a new card.
 
 ## If something is wrong
 
@@ -92,7 +92,7 @@ No sound, Hello works:
 
 - Confirm jack tip is pin 18 and sleeve is AGND pin 20.
 - Confirm the speaker/mixer is powered and its volume is up. This is line-level.
-- First-press volume is 0.4 on purpose. Later `random` can be quieter or louder.
+- First-press and post-`random` volume is 1.0. Line-out into headphones still sounds quiet.
 
 LED never blinks on press:
 

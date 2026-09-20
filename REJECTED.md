@@ -24,3 +24,5 @@ Closed doors. Do not re-propose these unless the author explicitly reopens them 
 - **Enlarging the audio DMA buffer to absorb OLED stalls** — rejected; adds latency and does not fix I2C mid-transfer corruption.
 - **On-screen `AUDIO STALL` during scope** — rejected; false positives while OLED masking pauses sample pushes, and the message caused visible flashing.
 - **Min/max scope columns (Phase 4)** — deferred; current scope is good enough for bring-up. Reopen only if smoother refresh is solved first.
+- **Shared MASTER volume pot on the panel** — dropped. Loudness is per-engine LEVEL next to voice pick. Mixer has no extra mix-wide scale for now.
+- **Dual-lane front panel** — dropped as the target. One strip of pots, switch engines 1–4. Two engines at once on the panel made the box too wide and doubled ADC count.
