@@ -1,4 +1,4 @@
-# Prompt: walk me through the Daisy breadboard OLED + jack setup
+# Prompt: walk me through the Daisy breadboard OLED + TRRS headphone jack
 
 Paste everything below this line into another agent chat.
 
@@ -12,7 +12,7 @@ You are helping me wire a Daisy Seed 3 breadboard so firmware `breadboard-led` i
 - Existing button: Seed D15 (physical pin 22) with internal pull-up, other side to GND (pin 40). Pin 21 next to D15 is analog 3V3. The button must not go there.
 - Existing LED: Seed D24 (physical pin 31) through a series resistor 330 Ω to 1 kΩ to the LED, cathode to GND (pin 40). Leave this wired. Firmware uses it as a gate lamp (on only while a note is held).
 - New screen: 0.96" 128x64 OLED, 4-pin I2C, labels GND, VDD, SCK, SDA. SCK is the I2C clock (same as SCL). VDD is 3.3 V. Default address 0x3C. Driver in firmware is SSD1306.
-- I need a mono 3.5 mm jack (or clips) for line-level audio. This is not a headphone amp. Use a powered speaker, mixer input, or computer line-in. Passive earbuds can be quiet, distorted, or risky.
+- TRRS 3.5 mm breakout for headphones (pads TIP, RING1, RING2, SLEEVE), two 10 µF electrolytic caps, two 100 Ω resistors. Line-level into headphones is quiet. This is not a headphone amp. Do not use the TDA2822 speaker board. Step-by-step headphone wiring: `host-daisy/TRRS_BREAKOUT_PROMPT.md`.
 
 Repo pinout drawing: `daisy-seed-3-pinout-diagram.png` at the repo root. Firmware comments in `host-daisy/src/bin/breadboard_led.rs` match this table.
 
@@ -30,11 +30,14 @@ Keep:
 - Button D15 pin 22 to GND pin 40
 - LED D24 pin 31 with series resistor to GND pin 40
 
-Audio jack (new):
+TRRS jack (new). Tie AGND pin 20 to DGND pin 40 first. Cap stripe toward the jack:
 
-- Tip (signal) -> Seed Audio Out 1, physical pin 18
-- Sleeve (ground) -> Seed AGND, physical pin 20
-- Ring unused for mono. Do not use digital GND pin 40 as the audio sleeve if you can use AGND.
+- Seed Audio Out 1, physical pin 18 -> 10 µF -> 100 Ω -> TIP
+- Seed Audio Out 2, physical pin 19 -> 10 µF -> 100 Ω -> RING1
+- Seed AGND, physical pin 20 -> RING2
+- SLEEVE unconnected at first; join to AGND if one ear is silent
+
+Do not use digital GND pin 40 as the headphone ground if AGND pin 20 is available.
 
 I2C modules usually already have pull-ups. Do not add extra resistors unless the screen never ACKs.
 
@@ -90,12 +93,11 @@ Hello never appears, no I2C ACK (firmware still plays audio):
 
 No sound, Hello works:
 
-- Confirm jack tip is pin 18 and sleeve is AGND pin 20.
-- Confirm the speaker/mixer is powered and its volume is up. This is line-level.
+- TIP through cap and 100 Ω to pin 18, RING1 the same to pin 19, RING2 to AGND pin 20. Try SLEEVE to AGND if one ear is silent.
 - First-press and post-`random` volume is 1.0. Line-out into headphones still sounds quiet.
 
 LED never blinks on press:
 
 - Button must short D15 to GND. LED still needs its resistor. Firmware only lights the LED during the 1 s gates, not during the 2 s rests.
 
-Start by asking me to confirm power is USB-C only, then walk pin 40 ground, then OLED power, then SCK/SDA, then the jack, then flash, then the Hello test.
+Start by asking me to confirm power is USB-C only, then walk pin 40 ground, then OLED power, then SCK/SDA, then the TRRS jack, then flash, then the Hello test.

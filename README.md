@@ -191,7 +191,7 @@ Confirm the double blink after flashing the firmware. If necessary, press RESET,
 
 Audio is line-level on Audio Out 1 and 2 (pins 18 and 19) and AGND (pin 20). Firmware copies the mono mix to both codec channels. A TRRS breakout plus 10 µF caps and 100 Ω resistors can drive headphones. OLED power is 3.3 V digital (pin 38) and GND (pin 40). Do not use analog 3.3 V on pin 21.
 
-Wiring walkthrough for another agent (OLED and line jack): [`host-daisy/BREADBOARD_SETUP_PROMPT.md`](host-daisy/BREADBOARD_SETUP_PROMPT.md). Headphones on the TRRS breakout: [`host-daisy/TRRS_BREAKOUT_PROMPT.md`](host-daisy/TRRS_BREAKOUT_PROMPT.md).
+Wiring walkthrough for another agent (OLED): [`host-daisy/BREADBOARD_SETUP_PROMPT.md`](host-daisy/BREADBOARD_SETUP_PROMPT.md). Headphones on the TRRS breakout: [`host-daisy/TRRS_BREAKOUT_PROMPT.md`](host-daisy/TRRS_BREAKOUT_PROMPT.md).
 
 One-time ARM/`dfu-util` setup is the same as double blink. When the repository is under `\\wsl$\...`, set `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` as shown in the Windows host section before building. Before flashing from WSL, put the Seed into DFU mode and attach the device shown by `usbipd list`.
 

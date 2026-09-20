@@ -8,8 +8,9 @@
 //! - D12 = physical pin 13. OLED I2C SDA.
 //! - D15 = physical pin 22. Button input with internal pull-up. Press shorts this pin to GND.
 //! - D24 = physical pin 31. LED output; high turns the LED on during each 1 s gate. Series resistor 330 Ω to 1 kΩ required
-//! - Audio Out 1 = physical pin 18. Line-level mono (copy to both codec channels).
-//! - AGND = physical pin 20. Audio ground for the jack sleeve.
+//! - Audio Out 1 = physical pin 18. TRRS TIP. Same mono mix copied to both codec channels.
+//! - Audio Out 2 = physical pin 19. TRRS RING1.
+//! - AGND = physical pin 20. TRRS RING2 (and SLEEVE if needed). Tie to DGND pin 40.
 //! - 3V3 digital = physical pin 38. OLED VDD. Do not use analog 3V3 on pin 21.
 //! - GND = physical pin 40. Shared ground for OLED, LED cathode, and button.
 //!
