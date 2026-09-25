@@ -38,7 +38,7 @@ const NOTE_VELOCITY: u8 = 100;
 const DEFAULT_NOTE: u8 = 60;
 const HEAVY_NOTES: [u8; 4] = [48, 52, 55, 59];
 const DEFAULT_VOLUME: f32 = 0.7;
-const HEAVY_VOLUME: f32 = 0.35;
+const HEAVY_VOLUME: f32 = 0.7;
 
 const MODE_SILENT: u8 = 0;
 const MODE_RAW_TRIANGLE: u8 = 1;
@@ -97,6 +97,9 @@ async fn main(spawner: Spawner) {
     let board = new_daisy_board!(p);
 
     let mut core = Peripherals::take().unwrap();
+    // Instruction cache on, data cache off. Flash fetches were the slow part.
+    // The data cache would also cover the codec DMA buffers in RAM_D2.
+    core.SCB.enable_icache();
     core.DCB.enable_trace();
     DWT::unlock();
     core.DWT.set_cycle_count(0);

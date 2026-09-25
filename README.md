@@ -99,9 +99,9 @@ The four at-pitch oscillator levels are normalized as weights. Sub is additive. 
 | `fenv a <ms>`; `fenv d <ms>`; `fenv s <0..1>`; `fenv r <ms>` | Filter ADSR |
 | `asenv dest off|res|pitch|cutoff|pw|amp`; `asenv amt <signed>` | Assignable destination and amount; octaves for pitch/cutoff, linear for resonance, pulse width, and amp; aliases: `resonance`, `pulse`, `pwm` |
 | `asenv a <ms>`; `asenv d <ms>`; `asenv s <0..1>`; `asenv r <ms>` | Assignable ADSR |
-| `lfo 1` / `lfo 2` dest off|res|pitch|cutoff|pw|amp; amt; rate; wave; retrig | Two assignable LFOs; bipolar swing around the knob; rate 0.05..20 Hz; retrig defaults on; waves `sine`, `tri`, `square`, `saw`, `sh` (aliases `triangle`, `sq`, `snh`); `lfo1` is invalid |
+| `lfo 1` / `lfo 2` dest off|res|pitch|cutoff|pw|amp; amt; rate; wave; retrig | Two assignable LFOs; one shared phase per engine, so every note of that engine reads the same level; bipolar swing around the knob; rate 0.05..20 Hz; retrig defaults off (a new note joins the current level; `retrig on` restarts that shared phase so held notes snap together); waves `sine`, `tri`, `square`, `saw`, `sh` (aliases `triangle`, `sq`, `snh`); `lfo1` is invalid |
 | `env copy`; `env link on|off`; `env vel <0..1>` | Copy amp times, link envelope times, and scale extra envelopes by velocity |
-| `random` | Randomize subtractive parameters, both LFOs, and volume `0.2..1.0`; keep enabled state and channel |
+| `random` | Randomize subtractive parameters, both LFOs, and volume `0.2..1.0`; always leaves LFO retrig off; keep enabled state and channel |
 
 
 `show` and `random` print qualified `eng N` lines and do not change enabled state or listen channel.
@@ -187,7 +187,7 @@ Confirm the double blink after flashing the firmware. If necessary, press RESET,
 
 ## Daisy audio probe
 
-`audio-probe` separates codec/SAI transport problems from synth engine load. It uses the D15 button, D24 LED, and the normal audio outputs. It does not initialize the OLED.
+`audio-probe` separates codec/SAI transport problems from synth engine load. It uses the D15 button, D24 LED, and the normal audio outputs. It does not initialize the OLED. The instruction cache is on and the data cache stays off. The shared sine table is copied into fast RAM at startup. The heavy patch, volume 0.7, and LFO retrig on are unchanged, so this flash is the same sound as the last listen. On 2026-09-25 that build was one blink on clicks 1 through 6, including four heavy notes.
 
 After the long boot flash, button presses select raw triangle, default saw, then the deterministic heavy patch with one, two, three, and four held voices. The sequence repeats after four voices. About two seconds after each press, the LED reports the peak callback load:
 
@@ -218,7 +218,7 @@ Before either flash command, hold BOOT, press and release RESET, then release BO
 
 ## Daisy breadboard play
 
-`breadboard-led` runs the synth engine through the Seed 3 codec, plus a 0.96" I2C OLED and the breadboard button/LED. Boot flashes the LED three times. OLED uses blocking I2C at 400 kHz with a 200 ms timeout so a missing screen cannot freeze the button. Hello is drawn, stays for 3 seconds, then the screen sleeps, all before audio starts. After that the Seed does not talk to the OLED. Audio uses the daisy-embassy Seed 3 callback. First button press plays C4, E4, G4 (1 s gate, 2 s rest) at volume 1.0. Later presses apply `random`, then replay, still at volume 1.0. The LED follows each 1 s gate. A continuous rapid blink means audio stopped after an interface error and the board needs a reset.
+`breadboard-led` runs the synth engine through the Seed 3 codec, plus a 0.96" I2C OLED and the breadboard button/LED. It uses the same cache choice as `audio-probe` (instruction cache on, data cache off). Boot flashes the LED three times. OLED uses blocking I2C at 400 kHz with a 200 ms timeout so a missing screen cannot freeze the button. Hello is drawn, stays for 3 seconds, then the screen sleeps, all before audio starts. After that the Seed does not talk to the OLED. Audio uses the daisy-embassy Seed 3 callback. First button press plays C4, E4, G4 (1 s gate, 2 s rest) at volume 1.0. Later presses apply `random`, then replay, still at volume 1.0. The LED follows each 1 s gate. A continuous rapid blink means audio stopped after an interface error and the board needs a reset.
 
 Audio is line-level on Audio Out 1 and 2 (pins 18 and 19) and AGND (pin 20). Firmware copies the mono mix to both codec channels. A TRRS breakout plus 10 µF caps and 100 Ω resistors can drive headphones. OLED power is 3.3 V digital (pin 38) and GND (pin 40). Do not use analog 3.3 V on pin 21.
 

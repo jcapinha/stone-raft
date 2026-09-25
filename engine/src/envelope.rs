@@ -85,6 +85,7 @@ impl Adsr {
     }
 
     /// Advances one sample and returns the current level in 0..1.
+    #[inline(always)]
     pub fn next_level(&mut self) -> f32 {
         match self.stage {
             EnvelopeStage::Idle => {

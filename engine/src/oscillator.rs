@@ -1,3 +1,5 @@
+use crate::sine::sine_from_phase;
+
 /// Waveform selected for every voice in an engine instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Waveform {
@@ -12,14 +14,12 @@ pub const PULSE_WIDTH_MIN: f32 = 0.05;
 pub const PULSE_WIDTH_MAX: f32 = 0.95;
 pub const PULSE_WIDTH_DEFAULT: f32 = 0.5;
 
-const TWO_PI: f32 = 6.283_185_5;
-
-/// Band-limited oscillator: PolyBLEP saw/square, PolyBLAMP triangle, pure sine.
+/// Band-limited oscillator: PolyBLEP saw/square, PolyBLAMP triangle, table sine.
 ///
 /// Naive digital saw/square waves create harsh extra frequencies (aliasing),
 /// especially on high notes. PolyBLEP corrects value jumps at edges; PolyBLAMP
 /// corrects slope jumps at triangle corners. Sine has no sharp edges, so it
-/// needs no correction.
+/// reads the shared lookup table instead of calling `libm::sinf` per sample.
 pub struct Oscillator {
     phase: f32,
     phase_increment: f32,
@@ -53,49 +53,69 @@ impl Oscillator {
 
     /// Advances one sample and returns a value in roughly [-1.0, 1.0].
     pub fn next_sample(&mut self) -> f32 {
+        match self.waveform {
+            Waveform::Saw => self.next_saw(),
+            Waveform::Square => self.next_square(),
+            Waveform::Triangle => self.next_triangle(),
+            Waveform::Sine => self.next_sine(),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn next_saw(&mut self) -> f32 {
         let t = self.phase;
         let dt = self.phase_increment;
+        let mut value = 2.0 * t - 1.0;
+        value -= poly_blep(t, dt);
+        self.advance_phase();
+        value
+    }
 
-        let sample = match self.waveform {
-            Waveform::Saw => {
-                // Naive saw in [-1, 1], then PolyBLEP at the wrap discontinuity.
-                let mut value = 2.0 * t - 1.0;
-                value -= poly_blep(t, dt);
-                value
-            }
-            Waveform::Square => {
-                // Variable-duty pulse: high for `pulse_width` of the cycle.
-                let pw = self.pulse_width;
-                let mut value = if t < pw { 1.0 } else { -1.0 };
-                // Rising edge at t=0, falling edge at t=pw.
-                value += poly_blep(t, dt);
-                value -= poly_blep((t + (1.0 - pw)) % 1.0, dt);
-                value
-            }
-            Waveform::Triangle => {
-                // Naive triangle in [-1, 1]; PolyBLAMP at slope corners (0 and 0.5).
-                let mut value = if t < 0.5 {
-                    4.0 * t - 1.0
-                } else {
-                    3.0 - 4.0 * t
-                };
-                // Slope jumps by ±8 at the corners; scale the unit PolyBLAMP residual.
-                value += 8.0 * dt * poly_blamp(t, dt);
-                value -= 8.0 * dt * poly_blamp((t + 0.5) % 1.0, dt);
-                value
-            }
-            Waveform::Sine => libm::sinf(TWO_PI * t),
+    #[inline(always)]
+    pub(crate) fn next_square(&mut self) -> f32 {
+        let t = self.phase;
+        let dt = self.phase_increment;
+        let pw = self.pulse_width;
+        let mut value = if t < pw { 1.0 } else { -1.0 };
+        value += poly_blep(t, dt);
+        value -= poly_blep((t + (1.0 - pw)) % 1.0, dt);
+        self.advance_phase();
+        value
+    }
+
+    #[inline(always)]
+    pub(crate) fn next_triangle(&mut self) -> f32 {
+        let t = self.phase;
+        let dt = self.phase_increment;
+        let mut value = if t < 0.5 {
+            4.0 * t - 1.0
+        } else {
+            3.0 - 4.0 * t
         };
+        value += 8.0 * dt * poly_blamp(t, dt);
+        value -= 8.0 * dt * poly_blamp((t + 0.5) % 1.0, dt);
+        self.advance_phase();
+        value
+    }
 
-        self.phase += dt;
+    #[inline(always)]
+    pub(crate) fn next_sine(&mut self) -> f32 {
+        let value = sine_from_phase(self.phase);
+        self.advance_phase();
+        value
+    }
+
+    #[inline(always)]
+    fn advance_phase(&mut self) {
+        self.phase += self.phase_increment;
         if self.phase >= 1.0 {
             self.phase -= 1.0;
         }
-        sample
     }
 }
 
 /// Polynomial BLEP correction near a rising discontinuity at phase 0.
+#[inline(always)]
 fn poly_blep(t: f32, dt: f32) -> f32 {
     if dt <= 0.0 {
         return 0.0;
@@ -116,6 +136,7 @@ fn poly_blep(t: f32, dt: f32) -> f32 {
 /// PolyBLEP fixes a jump in level; PolyBLAMP fixes a jump in slope (as at a
 /// triangle corner). Multiply by the size of the slope change (and by `dt`
 /// when using this dimensionless residual form).
+#[inline(always)]
 fn poly_blamp(t: f32, dt: f32) -> f32 {
     if dt <= 0.0 {
         return 0.0;

@@ -32,7 +32,8 @@ impl Svf {
         self.ic2eq = 0.0;
     }
 
-    /// Processes one sample. `cutoff_hz` and `resonance` are per-sample values (params plus envelope modulation).
+    /// Processes one sample. Coefficients are rebuilt only when `cutoff_hz` or
+    /// `resonance` changes, so a voice can hold both for a control block.
     pub fn process(
         &mut self,
         input: f32,
@@ -40,6 +41,16 @@ impl Svf {
         cutoff_hz: f32,
         resonance: f32,
     ) -> f32 {
+        self.update_coefficients(sample_rate_hz, cutoff_hz, resonance);
+        self.tick(input)
+    }
+
+    pub(crate) fn update_coefficients(
+        &mut self,
+        sample_rate_hz: f32,
+        cutoff_hz: f32,
+        resonance: f32,
+    ) {
         let nyquist = sample_rate_hz * 0.5;
         let cutoff = cutoff_hz.clamp(20.0, nyquist * 0.99);
         let res = resonance.clamp(0.0, 1.0);
@@ -57,7 +68,11 @@ impl Svf {
             self.cached_cutoff = cutoff;
             self.cached_res = res;
         }
+    }
 
+    /// Filters one sample with the coefficients from the last update.
+    #[inline(always)]
+    pub(crate) fn tick(&mut self, input: f32) -> f32 {
         let v3 = input - self.ic2eq;
         let v1 = self.a1 * self.ic1eq + self.a2 * v3;
         let v2 = self.ic2eq + self.a2 * self.ic1eq + self.a3 * v3;
@@ -162,6 +177,22 @@ mod tests {
             (impulse_reset - impulse_fresh).abs() < 1e-6,
             "impulse after reset should match a fresh filter"
         );
+    }
+
+    #[test]
+    fn moving_cutoff_and_resonance_stay_finite() {
+        let mut svf = Svf::new();
+        let mut phase = 0.0f32;
+        for step in 0..SAMPLE_RATE_HZ as usize {
+            let cutoff = 100.0 + (step as f32 % 8_000.0);
+            let resonance = (step as f32 / SAMPLE_RATE_HZ) % 1.0;
+            let input = sine_sample(&mut phase, 440.0, SAMPLE_RATE_HZ);
+            let out = svf.process(input, SAMPLE_RATE_HZ, cutoff, resonance);
+            assert!(
+                out.is_finite(),
+                "moving cutoff and resonance must stay finite; got {out}"
+            );
+        }
     }
 
     #[test]

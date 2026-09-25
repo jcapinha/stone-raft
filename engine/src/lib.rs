@@ -6,6 +6,7 @@ mod lfo;
 mod mixer;
 mod oscillator;
 mod random;
+mod sine;
 mod voices;
 
 pub use envelope::{Adsr, AdsrTimes, EnvelopeStage, velocity_to_amp};
@@ -481,6 +482,7 @@ impl Engine {
     }
 
     /// Sums active voices and applies the engine's fixed output calibration.
+    #[inline]
     pub fn next_sample(&mut self) -> f32 {
         #[cfg(test)]
         {
@@ -1701,7 +1703,7 @@ mod tests {
             assert!((lfo.amount - 0.0).abs() < f32::EPSILON);
             assert!((lfo.rate_hz - LFO_RATE_DEFAULT_HZ).abs() < f32::EPSILON);
             assert_eq!(lfo.wave, LfoWave::Sine);
-            assert!(lfo.retrigger);
+            assert!(!lfo.retrigger);
         }
 
         let mut params = EngineParams::default();
@@ -1962,5 +1964,172 @@ mod tests {
                 "{label} note octave should dominate; base={at_base} octave={at_octave}"
             );
         }
+    }
+
+    #[test]
+    fn two_notes_share_one_lfo_level_when_retrig_is_off() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_wave(&mut engine, Waveform::Sine);
+        set_cutoff(&mut engine, 10_000.0);
+        set_res(&mut engine, 0.0);
+        set_fast_amp_sustain(&mut engine);
+        set_lfo_dest(&mut engine, LfoId::One, AssignableDest::Pitch);
+        set_lfo_amount(&mut engine, LfoId::One, 1.0);
+        set_lfo_rate(&mut engine, LfoId::One, 1.0);
+        set_lfo_wave(&mut engine, LfoId::One, LfoWave::Square);
+        set_lfo_retrig(&mut engine, LfoId::One, false);
+
+        // 0.6 s of silence lands the shared square in its negative half.
+        for _ in 0..28_800 {
+            engine.next_sample();
+        }
+        note_on(&mut engine, 60, 127);
+        note_on(&mut engine, 64, 127);
+        for _ in 0..64 {
+            engine.next_sample();
+        }
+        let samples = take_samples(&mut engine, 2_048);
+        for note in [60u8, 64] {
+            let base_hz = midi_note_to_hz(note);
+            let down = tone_strength(&samples, base_hz * 0.5);
+            let up = tone_strength(&samples, base_hz * 2.0);
+            assert!(
+                down > TONE_PRESENT,
+                "note {note} should join the current octave-down level; got {down}"
+            );
+            assert!(
+                down > up,
+                "note {note} should share the mid-cycle level, not a fresh start; down={down} up={up}"
+            );
+        }
+    }
+
+    #[test]
+    fn retrig_on_snaps_the_held_note_too() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_wave(&mut engine, Waveform::Sine);
+        set_cutoff(&mut engine, 10_000.0);
+        set_res(&mut engine, 0.0);
+        set_fast_amp_sustain(&mut engine);
+        set_lfo_dest(&mut engine, LfoId::One, AssignableDest::Pitch);
+        set_lfo_amount(&mut engine, LfoId::One, 1.0);
+        set_lfo_rate(&mut engine, LfoId::One, 1.0);
+        set_lfo_wave(&mut engine, LfoId::One, LfoWave::Square);
+        set_lfo_retrig(&mut engine, LfoId::One, true);
+
+        let held = 60u8;
+        let base_hz = midi_note_to_hz(held);
+        note_on(&mut engine, held, 127);
+        for _ in 0..28_800 {
+            engine.next_sample();
+        }
+        let before = take_samples(&mut engine, 1_024);
+        let down_before = tone_strength(&before, base_hz * 0.5);
+        let up_before = tone_strength(&before, base_hz * 2.0);
+        assert!(
+            down_before > up_before,
+            "held note should sit an octave down before retrig; down={down_before} up={up_before}"
+        );
+
+        note_on(&mut engine, 64, 127);
+        for _ in 0..64 {
+            engine.next_sample();
+        }
+        let after = take_samples(&mut engine, 2_048);
+        let down_after = tone_strength(&after, base_hz * 0.5);
+        let up_after = tone_strength(&after, base_hz * 2.0);
+        assert!(
+            up_after > TONE_PRESENT,
+            "held note should snap to the restarted level; got {up_after}"
+        );
+        assert!(
+            up_after > down_after,
+            "held note should leave the octave-down level; down={down_after} up={up_after}"
+        );
+    }
+
+    #[test]
+    fn sine_lfo_cutoff_still_moves_brightness_across_blocks() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_wave(&mut engine, Waveform::Square);
+        set_cutoff(&mut engine, 400.0);
+        set_res(&mut engine, 0.0);
+        set_fast_amp_sustain(&mut engine);
+        set_lfo_dest(&mut engine, LfoId::One, AssignableDest::Cutoff);
+        set_lfo_amount(&mut engine, LfoId::One, 4.0);
+        set_lfo_rate(&mut engine, LfoId::One, 1.0);
+        set_lfo_wave(&mut engine, LfoId::One, LfoWave::Sine);
+        set_lfo_retrig(&mut engine, LfoId::One, true);
+
+        note_on(&mut engine, 57, 127);
+        for _ in 0..256 {
+            engine.next_sample();
+        }
+        let early = take_samples(&mut engine, 1_024);
+        for _ in 0..(11_000 - 256 - 1_024) {
+            engine.next_sample();
+        }
+        let late = take_samples(&mut engine, 1_024);
+        let harmonic_hz = midi_note_to_hz(57) * 5.0;
+        let early_h = tone_strength(&early, harmonic_hz);
+        let late_h = tone_strength(&late, harmonic_hz);
+        assert!(
+            late_h > early_h * 1.5,
+            "block-rate cutoff LFO should still open the filter; early={early_h} late={late_h}"
+        );
+    }
+
+    #[test]
+    fn four_voices_with_heavy_modulation_stay_finite_and_audible() {
+        let mut engine = Engine::new(SAMPLE_RATE_HZ);
+        set_saw_vol(&mut engine, 1.0);
+        set_square_vol(&mut engine, 1.0);
+        set_triangle_vol(&mut engine, 1.0);
+        set_sine_vol(&mut engine, 1.0);
+        set_pulse(&mut engine, 0.35);
+        set_sub_vol(&mut engine, 0.5);
+        set_cutoff(&mut engine, 600.0);
+        set_res(&mut engine, 0.65);
+        set_fast_amp_sustain(&mut engine);
+        set_envelope(
+            &mut engine,
+            EnvelopeId::Filter,
+            AdsrTimes {
+                attack_ms: 50.0,
+                decay_ms: 1_500.0,
+                sustain: 0.25,
+                release_ms: 500.0,
+            },
+        );
+        engine.apply(ControlEvent::SetFilterEnvAmount { amount: 4.0 });
+        engine.apply(ControlEvent::SetAssignableDest {
+            dest: AssignableDest::Resonance,
+        });
+        engine.apply(ControlEvent::SetAssignableAmount { amount: 0.5 });
+        set_lfo_dest(&mut engine, LfoId::One, AssignableDest::Cutoff);
+        set_lfo_amount(&mut engine, LfoId::One, 1.5);
+        set_lfo_rate(&mut engine, LfoId::One, 1.3);
+        set_lfo_wave(&mut engine, LfoId::One, LfoWave::Sine);
+        set_lfo_dest(&mut engine, LfoId::Two, AssignableDest::Pitch);
+        set_lfo_amount(&mut engine, LfoId::Two, 0.08);
+        set_lfo_rate(&mut engine, LfoId::Two, 0.7);
+        set_lfo_wave(&mut engine, LfoId::Two, LfoWave::Sine);
+
+        for note in [48u8, 52, 55, 59] {
+            note_on(&mut engine, note, 100);
+        }
+        let mut peak = 0.0f32;
+        for _ in 0..8_000 {
+            let sample = engine.next_sample();
+            assert!(
+                sample.is_finite(),
+                "heavy four-voice render must stay finite; got {sample}"
+            );
+            peak = peak.max(sample.abs());
+        }
+        assert!(
+            peak > 0.02,
+            "heavy four-voice render should stay audible; peak={peak}"
+        );
     }
 }

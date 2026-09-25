@@ -25,6 +25,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use cortex_m::peripheral::Peripherals;
 use daisy_embassy::audio::AudioPeripherals;
 use daisy_embassy::hal::gpio::{Input, Level, Output, Pull, Speed};
 use daisy_embassy::hal::i2c::{self, I2c};
@@ -80,6 +81,10 @@ static GATE_LED_ON: AtomicBool = AtomicBool::new(false);
 async fn main(spawner: Spawner) {
     let p = hal::init(daisy_embassy::default_rcc());
     let board = new_daisy_board!(p);
+
+    let mut core = Peripherals::take().unwrap();
+    // Instruction cache on, data cache off. Same choice as audio-probe.
+    core.SCB.enable_icache();
 
     let button = Input::new(board.pins.d15, Pull::Up);
     let mut led = Output::new(board.pins.d24, Level::Low, Speed::Low);

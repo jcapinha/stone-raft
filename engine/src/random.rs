@@ -297,7 +297,7 @@ fn random_lfo<R: Rng>(rng: &mut R) -> LfoParams {
         amount: random_amount_for_dest(rng, dest),
         rate_hz: log_uniform(rng, LFO_RATE_MIN_HZ, LFO_RATE_MAX_HZ),
         wave: RANDOM_LFO_WAVES[rng.gen_range(0..RANDOM_LFO_WAVES.len())],
-        retrigger: rng.gen_bool(0.5),
+        retrigger: false,
     }
 }
 
@@ -315,6 +315,10 @@ mod tests {
             assert!(
                 (RANDOM_VOL_MIN..=RANDOM_VOL_MAX).contains(&volume),
                 "seed {seed}: volume {volume} out of range"
+            );
+            assert!(
+                !params.lfos[0].retrigger && !params.lfos[1].retrigger,
+                "seed {seed}: random leaves both LFO retrigs off"
             );
             assert!((RANDOM_CUTOFF_MIN_HZ..=RANDOM_CUTOFF_MAX_HZ).contains(&params.cutoff_hz));
             assert!((0.0..=RANDOM_RES_MAX).contains(&params.resonance));

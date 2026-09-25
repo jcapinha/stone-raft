@@ -1425,9 +1425,9 @@ mod tests {
         assert!(shown.contains("lfo 1 amt 0.00"));
         assert!(shown.contains("lfo 1 rate 1.00"));
         assert!(shown.contains("lfo 1 wave sine"));
-        assert!(shown.contains("lfo 1 retrig on"));
+        assert!(shown.contains("lfo 1 retrig off"));
         assert!(shown.contains("lfo 2 dest off"));
-        assert!(shown.contains("lfo 2 retrig on"));
+        assert!(shown.contains("lfo 2 retrig off"));
     }
 
     #[test]

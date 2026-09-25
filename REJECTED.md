@@ -20,6 +20,7 @@ Closed doors. Do not re-propose these unless the author explicitly reopens them 
 - **Runtime path discovery for ./play (`wslpath`)** — rejected; the local script hard-codes `\\wsl$\Ubuntu\home\capinha\audio_experiments\stone-raft`.
 - **Separate destination list for LFOs** — abandoned. LFOs share `AssignableDest` with the assignable envelope.
 - **Glued LFO tokens (`lfo1`)** — parser requires `lfo 1` with a space, matching `eng 2`.
+- **Per-voice LFO phase** — abandoned. One phase per LFO per engine, shared by every voice of that engine. Retrig defaults off (join the current level, including after silence). Retrig on restarts that shared phase so every sounding note snaps together. `random` always leaves retrig off. Do not bring back a private phase per note.
 - **Unmasked SPI4 during blocking OLED flushes** — tried; I2C corrupts and the display stops updating. Every blocking flush masks SPI4.
 - **Enlarging the audio DMA buffer to absorb OLED stalls** — rejected; adds latency and does not fix I2C mid-transfer corruption.
 - **Shrinking Daisy audio DMA to the daisy-embassy default (128) while audio ran on the SPI4 interrupt executor** — Hello and the gate LED still ran, but no sound.
