@@ -31,3 +31,4 @@ Closed doors. Do not re-propose these unless the author explicitly reopens them 
 - **Min/max scope columns (Phase 4)** — closed with live Daisy scope. Reopen only with a display path that does not pause audio.
 - **Shared MASTER volume pot on the panel** — dropped. Loudness is per-engine LEVEL next to voice pick. Mixer has no extra mix-wide scale for now.
 - **Dual-lane front panel** — dropped as the target. One strip of pots, switch engines 1–4. Two engines at once on the panel made the box too wide and doubled ADC count.
+- **Moving the mixer into DTCM** — abandoned. daisy-embassy already aliases RAM to DTCM, so the mixer is already there. A second move does nothing.

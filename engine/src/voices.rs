@@ -3,6 +3,7 @@
 //! Pitch, cutoff, resonance, pulse width, filter and assignable envelopes, and
 //! LFO levels are refreshed once per 32-sample block. That matches the Daisy
 //! callback. Waveform generation and the amplitude envelope still run at 48 kHz.
+//! Saw, square, triangle, and sine share one phase. The sub sine keeps its own.
 
 use crate::envelope::velocity_to_amp;
 use crate::filter::Svf;
@@ -48,10 +49,7 @@ struct HeldControl {
 }
 
 struct Voice {
-    saw: Oscillator,
-    square: Oscillator,
-    triangle: Oscillator,
-    sine: Oscillator,
+    at_pitch: Oscillator,
     sub: Oscillator,
     filter: Svf,
     amp: crate::Adsr,
@@ -69,10 +67,7 @@ struct Voice {
 impl Voice {
     fn new(sample_rate_hz: f32) -> Self {
         Self {
-            saw: Oscillator::new(sample_rate_hz, 440.0, Waveform::Saw),
-            square: Oscillator::new(sample_rate_hz, 440.0, Waveform::Square),
-            triangle: Oscillator::new(sample_rate_hz, 440.0, Waveform::Triangle),
-            sine: Oscillator::new(sample_rate_hz, 440.0, Waveform::Sine),
+            at_pitch: Oscillator::new_at_pitch(sample_rate_hz, 440.0),
             sub: Oscillator::new(sample_rate_hz, 220.0, Waveform::Sine),
             filter: Svf::new(),
             amp: crate::Adsr::new(sample_rate_hz),
@@ -110,11 +105,8 @@ impl Voice {
         params: &EngineParams,
     ) {
         let base_hz = midi_note_to_hz(note);
-        self.saw = Oscillator::new(sample_rate_hz, base_hz, Waveform::Saw);
-        self.square = Oscillator::new(sample_rate_hz, base_hz, Waveform::Square);
-        self.square.set_pulse_width(params.pulse_width);
-        self.triangle = Oscillator::new(sample_rate_hz, base_hz, Waveform::Triangle);
-        self.sine = Oscillator::new(sample_rate_hz, base_hz, Waveform::Sine);
+        self.at_pitch = Oscillator::new_at_pitch(sample_rate_hz, base_hz);
+        self.at_pitch.set_pulse_width(params.pulse_width);
         let sub_hz =
             (base_hz / params.sub_octaves.frequency_divisor()).clamp(20.0, sample_rate_hz * 0.25);
         self.sub = Oscillator::new(sample_rate_hz, sub_hz, Waveform::Sine);
@@ -160,17 +152,18 @@ impl Voice {
 
         let mut mix = 0.0;
         if self.control.saw_gain > 0.0 {
-            mix += self.control.saw_gain * self.saw.next_saw();
+            mix += self.control.saw_gain * self.at_pitch.sample_saw();
         }
         if self.control.square_gain > 0.0 {
-            mix += self.control.square_gain * self.square.next_square();
+            mix += self.control.square_gain * self.at_pitch.sample_square();
         }
         if self.control.triangle_gain > 0.0 {
-            mix += self.control.triangle_gain * self.triangle.next_triangle();
+            mix += self.control.triangle_gain * self.at_pitch.sample_triangle();
         }
         if self.control.sine_gain > 0.0 {
-            mix += self.control.sine_gain * self.sine.next_sine();
+            mix += self.control.sine_gain * self.at_pitch.sample_sine();
         }
+        self.at_pitch.advance_phase();
         if self.control.sub_gain > 0.0 {
             mix += self.control.sub_gain * self.sub.next_sine();
         }
@@ -212,11 +205,8 @@ impl Voice {
             .clamp(20.0, sample_rate_hz * 0.25);
         let pulse_width =
             (params.pulse_width + offsets.pulse_width).clamp(PULSE_WIDTH_MIN, PULSE_WIDTH_MAX);
-        self.saw.set_frequency(sample_rate_hz, oscillator_hz);
-        self.square.set_frequency(sample_rate_hz, oscillator_hz);
-        self.square.set_pulse_width(pulse_width);
-        self.triangle.set_frequency(sample_rate_hz, oscillator_hz);
-        self.sine.set_frequency(sample_rate_hz, oscillator_hz);
+        self.at_pitch.set_frequency(sample_rate_hz, oscillator_hz);
+        self.at_pitch.set_pulse_width(pulse_width);
         let sub_hz = (oscillator_hz / params.sub_octaves.frequency_divisor())
             .clamp(20.0, sample_rate_hz * 0.25);
         self.sub.set_frequency(sample_rate_hz, sub_hz);
@@ -236,14 +226,11 @@ impl Voice {
             self.velocity_amp * VOICE_AMPLITUDE * (1.0 + offsets.amp).max(0.0);
     }
 
-    /// Moves the slow envelopes one block ahead and returns the levels used for this block.
+    /// Level for this block is one step ahead. Stored level is where 32 steps land.
     fn advance_control_envelopes(&mut self) -> (f32, f32) {
-        let filter_level = self.filter_env.next_level();
-        let assign_level = self.assignable_env.next_level();
-        for _ in 1..CONTROL_BLOCK_SAMPLES {
-            let _ = self.filter_env.next_level();
-            let _ = self.assignable_env.next_level();
-        }
+        let samples = CONTROL_BLOCK_SAMPLES as u32;
+        let filter_level = self.filter_env.advance_block(samples);
+        let assign_level = self.assignable_env.advance_block(samples);
         (filter_level, assign_level)
     }
 }
@@ -316,7 +303,7 @@ impl Voices {
 
     pub(crate) fn synchronize_pulse_width(&mut self, width: f32) {
         for voice in &mut self.voices {
-            voice.square.set_pulse_width(width);
+            voice.at_pitch.set_pulse_width(width);
         }
     }
 
@@ -403,5 +390,50 @@ mod tests {
         let notes = core::array::from_fn(|index| voices.voices[index].note);
         assert_eq!(notes, [60, 62, 64, 65]);
         assert!(voices.render_sample(&params).is_finite());
+    }
+
+    fn phase_after(increment: f32, steps: u32) -> f32 {
+        let mut phase = 0.0;
+        for _ in 0..steps {
+            phase += increment;
+            if phase >= 1.0 {
+                phase -= 1.0;
+            }
+        }
+        phase
+    }
+
+    #[test]
+    fn mixed_saw_and_square_share_one_phase() {
+        let mut params = EngineParams::default();
+        params.square_vol = 1.0;
+        params.sub_vol = 1.0;
+        let mut voices = Voices::new(SAMPLE_RATE_HZ, &params);
+        voices.note_on(69, 127, &params);
+        for _ in 0..100 {
+            voices.render_sample(&params);
+        }
+
+        let at_pitch = &voices.voices[0].at_pitch;
+        let sub = &voices.voices[0].sub;
+        let phase = at_pitch.phase();
+        let increment = at_pitch.phase_increment();
+        let expected = phase_after(increment, 100);
+        let doubled = phase_after(increment, 200);
+        assert!(
+            (phase - expected).abs() < 1e-5,
+            "shared phase {phase} != 100 steps of {increment} ({expected})"
+        );
+        assert!(
+            (phase - doubled).abs() > 1e-3,
+            "shared phase matched 200 steps; saw and square each advanced"
+        );
+        let sub_phase = sub.phase();
+        let sub_expected = phase_after(sub.phase_increment(), 100);
+        assert!(
+            (sub_phase - sub_expected).abs() < 1e-5,
+            "sub phase {sub_phase} != its own 100 steps ({sub_expected})"
+        );
+        assert!((sub.phase_increment() * 2.0 - increment).abs() < 1e-5);
     }
 }

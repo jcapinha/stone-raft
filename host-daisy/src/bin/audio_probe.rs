@@ -20,7 +20,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use cortex_m::peripheral::{DWT, Peripherals};
+use cortex_m::peripheral::{CPUID, DWT, MPU, Peripherals, SCB};
 use daisy_embassy::audio::AudioPeripherals;
 use daisy_embassy::hal::gpio::{Input, Level, Output, Pull, Speed};
 use daisy_embassy::{hal, new_daisy_board};
@@ -68,6 +68,11 @@ const ERROR_BLINK_MS: u64 = 75;
 const DEBOUNCE_MS: u64 = 30;
 const POLL_MS: u64 = 10;
 
+/// Codec DMA buffers live in RAM_D2 (288K). 512K is the next MPU size and ends before RAM_D3.
+const RAM_D2_BASE: u32 = 0x3000_0000;
+/// `2^(18 + 1)` bytes.
+const RAM_D2_SIZE_FIELD: u32 = 18;
+
 static MIXER: StaticCell<Mixer> = StaticCell::new();
 static EVENT_QUEUE: StaticCell<Queue<MixerEvent, EVENT_QUEUE_CAP>> = StaticCell::new();
 static TEST_MODE: AtomicU8 = AtomicU8::new(MODE_SILENT);
@@ -107,15 +112,48 @@ impl ProbeStep {
     }
 }
 
+/// Data cache on. RAM_D2 stays non-cacheable so codec DMA and the CPU agree.
+///
+/// Attributes match libDaisy's SRAM D2 region: full access, TEX=1, shareable,
+/// not cacheable, not bufferable. The privileged default map stays on.
+fn enable_dcache_with_uncached_ram_d2(mpu: &mut MPU, scb: &mut SCB, cpuid: &mut CPUID) {
+    const REGION_NUMBER: u32 = 0;
+    const REGION_FULL_ACCESS: u32 = 0x03;
+    const TEX_LEVEL1: u32 = 0x01;
+    const SHAREABLE: u32 = 0x01;
+    const REGION_ENABLE: u32 = 0x01;
+    const MPU_ENABLE: u32 = 0x01;
+    const MPU_PRIVDEFENA: u32 = 0x04;
+
+    // TEX is bits 19-21, S is bit 18, C is bit 17, B is bit 16. C and B stay clear.
+    let rasr = (REGION_FULL_ACCESS << 24)
+        | (TEX_LEVEL1 << 19)
+        | (SHAREABLE << 18)
+        | (RAM_D2_SIZE_FIELD << 1)
+        | REGION_ENABLE;
+
+    unsafe {
+        cortex_m::asm::dmb();
+        mpu.ctrl.write(0);
+        mpu.rnr.write(REGION_NUMBER);
+        mpu.rbar.write(RAM_D2_BASE);
+        mpu.rasr.write(rasr);
+        mpu.ctrl.write(MPU_PRIVDEFENA | MPU_ENABLE);
+        cortex_m::asm::dsb();
+        cortex_m::asm::isb();
+    }
+    scb.enable_dcache(cpuid);
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = hal::init(daisy_embassy::default_rcc());
     let board = new_daisy_board!(p);
 
     let mut core = Peripherals::take().unwrap();
-    // Instruction cache on, data cache off. Flash fetches were the slow part.
-    // The data cache would also cover the codec DMA buffers in RAM_D2.
+    // Instruction cache stays on. Data cache is on for this probe only.
     core.SCB.enable_icache();
+    enable_dcache_with_uncached_ram_d2(&mut core.MPU, &mut core.SCB, &mut core.CPUID);
     core.DCB.enable_trace();
     DWT::unlock();
     core.DWT.set_cycle_count(0);

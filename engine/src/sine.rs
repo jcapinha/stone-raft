@@ -38,11 +38,13 @@ const fn quarter_table() -> [f32; QUARTER_LEN + 1] {
     table
 }
 
-/// Sine of a phase in cycles, where `1.0` is one full turn. Callers keep `phase`
-/// in `0..1`. A value that lands exactly on the end of the table wraps to zero.
+/// Sine of a phase in cycles, where `1.0` is one full turn.
+///
+/// Oscillators advance by at most one cycle per sample, so a phase in `1..2`
+/// wraps with one subtract. A value that lands on the end of the table wraps to zero.
 #[inline(always)]
 pub(crate) fn sine_from_phase(phase: f32) -> f32 {
-    let phase = if phase >= 1.0 { phase % 1.0 } else { phase };
+    let phase = if phase >= 1.0 { phase - 1.0 } else { phase };
     let scaled = phase * CYCLE_LEN as f32;
     let mut index = scaled as u32;
     let mut frac = scaled - index as f32;
@@ -86,5 +88,11 @@ mod tests {
         assert!((sine_from_phase(0.25) - 1.0).abs() < 1.0e-6);
         assert!(sine_from_phase(0.5).abs() < 1.0e-6);
         assert!((sine_from_phase(0.75) + 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn phase_past_one_wraps_with_one_subtract() {
+        assert!((sine_from_phase(1.25) - sine_from_phase(0.25)).abs() < 1e-6);
+        assert!(sine_from_phase(1.0).abs() < 1e-6);
     }
 }

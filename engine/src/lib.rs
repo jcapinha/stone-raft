@@ -189,7 +189,7 @@ pub(crate) fn hz_times_octaves(hz: f32, octaves: f32) -> f32 {
 /// Live voice updates required after applying a parameter event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParamEffects {
-    /// Copy the stored pulse width to square oscillators on existing voices.
+    /// Copy the stored pulse width onto each voice's at-pitch oscillator.
     pub synchronize_pulse_width: bool,
     /// Copy the stored ADSR settings to existing voices.
     pub synchronize_envelopes: bool,

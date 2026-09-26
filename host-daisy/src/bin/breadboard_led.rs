@@ -83,7 +83,7 @@ async fn main(spawner: Spawner) {
     let board = new_daisy_board!(p);
 
     let mut core = Peripherals::take().unwrap();
-    // Instruction cache on, data cache off. Same choice as audio-probe.
+    // Instruction cache on, data cache off.
     core.SCB.enable_icache();
 
     let button = Input::new(board.pins.d15, Pull::Up);
