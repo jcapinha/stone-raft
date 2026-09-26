@@ -8,7 +8,10 @@
 //! 1. Raw triangle, with the synth engine bypassed.
 //! 2. The default one-saw engine patch with one held note.
 //! 3. A deterministic heavy patch with one held note.
-//! 4. The same heavy patch with two, three, then four held notes.
+//! 4. The same heavy patch with two, three, then four held notes, all on engine 1.
+//! 5. The same heavy patch on two engines, one note each.
+//! 6. The same heavy patch on four engines, one note each.
+//! 7. The same heavy patch on two, three, then four engines, with all four voices held on each.
 //!
 //! After a short settling period, the LED reports the peak 32-frame callback
 //! cost: one blink is under 50% of the available cycles, two is 50-75%, and
@@ -24,8 +27,8 @@ use daisy_embassy::{hal, new_daisy_board};
 use embassy_executor::Spawner;
 use embassy_time::Timer;
 use engine::{
-    AdsrTimes, AssignableDest, EngineParams, InstanceEvent, LfoParams, LfoWave, Mixer, MixerEvent,
-    SubOctaves, patch_events,
+    AdsrTimes, AssignableDest, ENGINE_COUNT, EngineParams, InstanceEvent, LfoParams, LfoWave,
+    Mixer, MixerEvent, SubOctaves, patch_events,
 };
 use heapless::spsc::{Consumer, Producer, Queue};
 use static_cell::StaticCell;
@@ -39,6 +42,9 @@ const DEFAULT_NOTE: u8 = 60;
 const HEAVY_NOTES: [u8; 4] = [48, 52, 55, 59];
 const DEFAULT_VOLUME: f32 = 0.7;
 const HEAVY_VOLUME: f32 = 0.7;
+// Lower per engine so the summed mix stays near the single-engine listen level.
+const TWO_ENGINE_VOLUME: f32 = 0.35;
+const FOUR_ENGINE_VOLUME: f32 = 0.25;
 
 const MODE_SILENT: u8 = 0;
 const MODE_RAW_TRIANGLE: u8 = 1;
@@ -76,6 +82,11 @@ enum ProbeStep {
     HeavyTwo,
     HeavyThree,
     HeavyFour,
+    HeavyTwoEngines,
+    HeavyFourEngines,
+    HeavyTwoEnginesFourNotes,
+    HeavyThreeEnginesFourNotes,
+    HeavyFourEnginesFourNotes,
 }
 
 impl ProbeStep {
@@ -86,7 +97,12 @@ impl ProbeStep {
             ProbeStep::HeavyOne => ProbeStep::HeavyTwo,
             ProbeStep::HeavyTwo => ProbeStep::HeavyThree,
             ProbeStep::HeavyThree => ProbeStep::HeavyFour,
-            ProbeStep::HeavyFour => ProbeStep::RawTriangle,
+            ProbeStep::HeavyFour => ProbeStep::HeavyTwoEngines,
+            ProbeStep::HeavyTwoEngines => ProbeStep::HeavyFourEngines,
+            ProbeStep::HeavyFourEngines => ProbeStep::HeavyTwoEnginesFourNotes,
+            ProbeStep::HeavyTwoEnginesFourNotes => ProbeStep::HeavyThreeEnginesFourNotes,
+            ProbeStep::HeavyThreeEnginesFourNotes => ProbeStep::HeavyFourEnginesFourNotes,
+            ProbeStep::HeavyFourEnginesFourNotes => ProbeStep::RawTriangle,
         }
     }
 }
@@ -176,7 +192,8 @@ async fn probe_ui(
     mut led: Output<'static>,
     mut producer: Producer<'static, MixerEvent>,
 ) -> ! {
-    let mut step = ProbeStep::HeavyFour;
+    // First press calls next(), so start on the last step. That keeps click 1 on the raw triangle.
+    let mut step = ProbeStep::HeavyFourEnginesFourNotes;
 
     loop {
         if !wait_for_press(&button).await || !wait_for_release(&button).await {
@@ -207,14 +224,19 @@ async fn configure_step(step: ProbeStep, producer: &mut Producer<'static, MixerE
     match step {
         ProbeStep::RawTriangle => {
             TEST_MODE.store(MODE_RAW_TRIANGLE, Ordering::Relaxed);
-            enqueue(producer, enabled_event(false))
+            disable_all(producer)
         }
         ProbeStep::DefaultEngine => {
             TEST_MODE.store(MODE_SILENT, Ordering::Relaxed);
-            if !enqueue(producer, enabled_event(false))
-                || !enqueue_patch(producer, &EngineParams::default(), DEFAULT_VOLUME)
-                || !enqueue(producer, enabled_event(true))
-                || !enqueue(producer, note_on(DEFAULT_NOTE))
+            if !disable_all(producer)
+                || !enqueue_patch(
+                    producer,
+                    ENGINE_INSTANCE,
+                    &EngineParams::default(),
+                    DEFAULT_VOLUME,
+                )
+                || !enqueue(producer, enabled_event(ENGINE_INSTANCE, true))
+                || !enqueue(producer, note_on(LISTEN_CHANNEL, DEFAULT_NOTE))
             {
                 return false;
             }
@@ -226,10 +248,10 @@ async fn configure_step(step: ProbeStep, producer: &mut Producer<'static, MixerE
         }
         ProbeStep::HeavyOne => {
             TEST_MODE.store(MODE_SILENT, Ordering::Relaxed);
-            if !enqueue(producer, enabled_event(false))
-                || !enqueue_patch(producer, &heavy_params(), HEAVY_VOLUME)
-                || !enqueue(producer, enabled_event(true))
-                || !enqueue(producer, note_on(HEAVY_NOTES[0]))
+            if !disable_all(producer)
+                || !enqueue_patch(producer, ENGINE_INSTANCE, &heavy_params(), HEAVY_VOLUME)
+                || !enqueue(producer, enabled_event(ENGINE_INSTANCE, true))
+                || !enqueue(producer, note_on(LISTEN_CHANNEL, HEAVY_NOTES[0]))
             {
                 return false;
             }
@@ -239,10 +261,58 @@ async fn configure_step(step: ProbeStep, producer: &mut Producer<'static, MixerE
             TEST_MODE.store(MODE_HEAVY_ENGINE, Ordering::Relaxed);
             true
         }
-        ProbeStep::HeavyTwo => enqueue(producer, note_on(HEAVY_NOTES[1])),
-        ProbeStep::HeavyThree => enqueue(producer, note_on(HEAVY_NOTES[2])),
-        ProbeStep::HeavyFour => enqueue(producer, note_on(HEAVY_NOTES[3])),
+        ProbeStep::HeavyTwo => enqueue(producer, note_on(LISTEN_CHANNEL, HEAVY_NOTES[1])),
+        ProbeStep::HeavyThree => enqueue(producer, note_on(LISTEN_CHANNEL, HEAVY_NOTES[2])),
+        ProbeStep::HeavyFour => enqueue(producer, note_on(LISTEN_CHANNEL, HEAVY_NOTES[3])),
+        ProbeStep::HeavyTwoEngines => {
+            configure_heavy_engines(producer, 2, 1, TWO_ENGINE_VOLUME).await
+        }
+        ProbeStep::HeavyFourEngines => {
+            configure_heavy_engines(producer, ENGINE_COUNT as u8, 1, FOUR_ENGINE_VOLUME).await
+        }
+        ProbeStep::HeavyTwoEnginesFourNotes => {
+            configure_heavy_engines(producer, 2, HEAVY_NOTES.len(), HEAVY_VOLUME / 2.0).await
+        }
+        ProbeStep::HeavyThreeEnginesFourNotes => {
+            configure_heavy_engines(producer, 3, HEAVY_NOTES.len(), HEAVY_VOLUME / 3.0).await
+        }
+        ProbeStep::HeavyFourEnginesFourNotes => {
+            configure_heavy_engines(
+                producer,
+                ENGINE_COUNT as u8,
+                HEAVY_NOTES.len(),
+                HEAVY_VOLUME / ENGINE_COUNT as f32,
+            )
+            .await
+        }
     }
+}
+
+async fn configure_heavy_engines(
+    producer: &mut Producer<'static, MixerEvent>,
+    engine_count: u8,
+    notes_per_engine: usize,
+    volume: f32,
+) -> bool {
+    TEST_MODE.store(MODE_SILENT, Ordering::Relaxed);
+    if !disable_all(producer) || !wait_unless_error(CONFIG_SILENCE_MS).await {
+        return false;
+    }
+
+    let params = heavy_params();
+    for instance in 1..=engine_count {
+        if !enqueue_patch(producer, instance, &params, volume)
+            || !enqueue(producer, enabled_event(instance, true))
+            || !wait_unless_error(CONFIG_SILENCE_MS).await
+            || !hold_notes(producer, instance, notes_per_engine)
+            || !wait_unless_error(CONFIG_SILENCE_MS).await
+        {
+            return false;
+        }
+    }
+
+    TEST_MODE.store(MODE_HEAVY_ENGINE, Ordering::Relaxed);
+    true
 }
 
 fn heavy_params() -> EngineParams {
@@ -298,10 +368,11 @@ fn heavy_params() -> EngineParams {
 
 fn enqueue_patch(
     producer: &mut Producer<'static, MixerEvent>,
+    instance: u8,
     params: &EngineParams,
     volume: f32,
 ) -> bool {
-    for event in patch_events(ENGINE_INSTANCE, params, volume).as_slice() {
+    for event in patch_events(instance, params, volume).as_slice() {
         if !enqueue(producer, *event) {
             return false;
         }
@@ -309,16 +380,45 @@ fn enqueue_patch(
     true
 }
 
-fn enabled_event(on: bool) -> MixerEvent {
+fn enabled_event(instance: u8, on: bool) -> MixerEvent {
     MixerEvent::ToInstance {
-        instance: ENGINE_INSTANCE,
+        instance,
         event: InstanceEvent::SetEnabled { on },
     }
 }
 
-fn note_on(note: u8) -> MixerEvent {
+fn disable_all(producer: &mut Producer<'static, MixerEvent>) -> bool {
+    for instance in 1..=ENGINE_COUNT as u8 {
+        if !enqueue(producer, enabled_event(instance, false)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn hold_notes(
+    producer: &mut Producer<'static, MixerEvent>,
+    instance: u8,
+    notes_per_engine: usize,
+) -> bool {
+    if notes_per_engine == 1 {
+        return enqueue(
+            producer,
+            note_on(instance, HEAVY_NOTES[(instance - 1) as usize]),
+        );
+    }
+
+    for note in HEAVY_NOTES.iter().take(notes_per_engine) {
+        if !enqueue(producer, note_on(instance, *note)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn note_on(channel: u8, note: u8) -> MixerEvent {
     MixerEvent::MidiNoteOn {
-        channel: LISTEN_CHANNEL,
+        channel,
         note,
         velocity: NOTE_VELOCITY,
     }

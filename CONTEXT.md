@@ -151,6 +151,9 @@ Four engine instances live in a mixer in the `engine` crate. Instance 1 starts e
 **Per-engine fixed polyphony**
 Each engine has a fixed set of 4 voices. Measured on `audio-probe` with the instruction cache on, the data cache off, and the sine table in DTCM: the heavy patch at volume 0.7 stays under 50% of the 32-sample callback for one through four held notes (one blink on clicks 1 through 6, 2026-09-25). Note-off starts amp release; a voice frees when the amp envelope finishes. When stealing, prefer voices already in release (oldest among those), else the oldest voice overall. Note number → Hz lives in the engine. Voices use a fixed low per-voice gain, velocity curve, and are summed (no divide-by-voice-count). A shared voice pool may come later if channels starve each other.
 
+**Daisy audio-probe stress test**
+`audio-probe` stays the Daisy stress test for engine load on the Seed. The heavy-patch engines it loads keep sounding through click 8: one engine with up to four notes, two engines with one note each, and four engines with one note each. Click 9 loads two engines with all four heavy notes each, and the audio callback stops.
+
 **Per-engine output calibration**
 Each engine applies a fixed 1.75 output multiplier after summing its voices. `vol` remains per-engine from 0 through 1; `vol 1` is that synth's calibrated full output. The uniform calibration preserves oscillator mix, sub level, envelopes, filter response, velocity, and modulation. The mixer does not automatically normalize combined engines.
 
