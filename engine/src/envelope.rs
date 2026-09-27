@@ -16,7 +16,6 @@ impl AmpRun {
     }
 }
 
-/// One amp-envelope step. Same thresholds as [`Adsr::next_level`].
 #[inline(always)]
 pub(crate) fn step_amp(run: &mut AmpRun) -> f32 {
     match run.stage {

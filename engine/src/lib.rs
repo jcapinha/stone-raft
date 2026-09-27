@@ -489,9 +489,7 @@ impl Engine {
         sample[0]
     }
 
-    /// Adds this engine's samples into `output`, scaled by `volume`.
-    ///
-    /// One entry per sample. Same values as `volume` times that many [`Self::next_sample`] calls.
+    /// Adds this engine into `output`, one sample per entry, scaled by `volume`.
     pub(crate) fn add_block(&mut self, output: &mut [f32], volume: f32) {
         #[cfg(test)]
         {

@@ -97,8 +97,7 @@ impl Svf {
     }
 }
 
-/// One lowpass step. Same equation as [`Svf::tick`], with the two memories passed in
-/// so a voice can keep them in locals across a block.
+/// Lowpass step used by [`Svf::tick`].
 #[inline(always)]
 pub(crate) fn step_svf(
     ic1eq: &mut f32,

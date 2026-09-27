@@ -11,7 +11,9 @@
 //! 4. The same heavy patch with two, three, then four held notes, all on engine 1.
 //! 5. The same heavy patch on two engines, one note each.
 //! 6. The same heavy patch on four engines, one note each.
-//! 7. The same heavy patch on two, three, then four engines, with all four voices held on each.
+//! 7. The same heavy patch on two, then three engines, with all four voices held on each.
+//! 8. Engine 4 joins that patch with one note. Engines 1–3 stay as they were.
+//! 9. All four engines with all four voices held. Then the sequence repeats.
 //!
 //! After a short settling period, the LED reports the peak 32-frame callback
 //! cost: one blink is under 50% of the available cycles, two is 50-75%, and
@@ -91,6 +93,7 @@ enum ProbeStep {
     HeavyFourEngines,
     HeavyTwoEnginesFourNotes,
     HeavyThreeEnginesFourNotes,
+    HeavyEngineFourOneNote,
     HeavyFourEnginesFourNotes,
 }
 
@@ -106,7 +109,8 @@ impl ProbeStep {
             ProbeStep::HeavyTwoEngines => ProbeStep::HeavyFourEngines,
             ProbeStep::HeavyFourEngines => ProbeStep::HeavyTwoEnginesFourNotes,
             ProbeStep::HeavyTwoEnginesFourNotes => ProbeStep::HeavyThreeEnginesFourNotes,
-            ProbeStep::HeavyThreeEnginesFourNotes => ProbeStep::HeavyFourEnginesFourNotes,
+            ProbeStep::HeavyThreeEnginesFourNotes => ProbeStep::HeavyEngineFourOneNote,
+            ProbeStep::HeavyEngineFourOneNote => ProbeStep::HeavyFourEnginesFourNotes,
             ProbeStep::HeavyFourEnginesFourNotes => ProbeStep::RawTriangle,
         }
     }
@@ -316,6 +320,10 @@ async fn configure_step(step: ProbeStep, producer: &mut Producer<'static, MixerE
         ProbeStep::HeavyThreeEnginesFourNotes => {
             configure_heavy_engines(producer, 3, HEAVY_NOTES.len(), HEAVY_VOLUME / 3.0).await
         }
+        ProbeStep::HeavyEngineFourOneNote => {
+            // Engines 1–3 are already at this volume with four notes. This only adds engine 4.
+            add_one_note_engine(producer, ENGINE_COUNT as u8, HEAVY_VOLUME / 3.0).await
+        }
         ProbeStep::HeavyFourEnginesFourNotes => {
             configure_heavy_engines(
                 producer,
@@ -353,6 +361,17 @@ async fn configure_heavy_engines(
 
     TEST_MODE.store(MODE_HEAVY_ENGINE, Ordering::Relaxed);
     true
+}
+
+async fn add_one_note_engine(
+    producer: &mut Producer<'static, MixerEvent>,
+    instance: u8,
+    volume: f32,
+) -> bool {
+    enqueue_patch(producer, instance, &heavy_params(), volume)
+        && enqueue(producer, enabled_event(instance, true))
+        && wait_unless_error(CONFIG_SILENCE_MS).await
+        && hold_notes(producer, instance, 1)
 }
 
 fn heavy_params() -> EngineParams {

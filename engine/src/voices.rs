@@ -42,8 +42,7 @@ fn add_assignable(offsets: &mut ModOffsets, dest: AssignableDest, level: f32, am
 
 /// Conservative per-voice gain so a few bright voices stay near full scale.
 const VOICE_AMPLITUDE: f32 = 0.12;
-/// Slow controls stay fixed for this many samples, then move again.
-/// This is not lined up with the audio callback.
+/// Samples between pitch, filter, and mix updates. Not aligned to the callback.
 pub(crate) const CONTROL_BLOCK_SAMPLES: usize = 32;
 
 struct WaveControls {
@@ -152,9 +151,6 @@ impl Voice {
         self.assignable_env.force_idle();
     }
 
-    /// Adds this voice into `output`. Phase, filter memories, and the amp envelope
-    /// stay in locals for the whole slice. `lfo_levels[i]` is the shared LFO pair
-    /// for output sample `i`.
     fn accumulate(
         &mut self,
         sample_rate_hz: f32,
@@ -370,12 +366,8 @@ impl Voices {
         sample[0]
     }
 
-    /// Adds the summed voices into `output`, one entry per sample.
-    ///
-    /// The slice is at most one control block long. Callers that need more
-    /// split it first. Each active voice runs that slice in one inner loop.
+    /// `output` must be at most [`CONTROL_BLOCK_SAMPLES`] long.
     pub(crate) fn add_dry(&mut self, params: &EngineParams, output: &mut [f32]) {
-        debug_assert!(output.len() <= CONTROL_BLOCK_SAMPLES);
         let mut lfo_levels = [[0.0f32; 2]; CONTROL_BLOCK_SAMPLES];
         let count = output.len();
         for levels in lfo_levels.iter_mut().take(count) {

@@ -156,10 +156,7 @@ impl Mixer {
         sample[0]
     }
 
-    /// Fills `output` with one mono sample per entry.
-    ///
-    /// Same samples as calling [`Self::next_sample`] once per entry. Each active
-    /// voice renders the slice in one inner loop.
+    /// Fills `output` with the same samples as one [`Self::next_sample`] call per entry.
     pub fn render_block(&mut self, output: &mut [f32]) {
         output.fill(0.0);
         for instance in self.instances.iter_mut() {
