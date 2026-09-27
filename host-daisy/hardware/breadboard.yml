@@ -1,0 +1,249 @@
+# WireViz wiring diagram for the assembled Daisy Seed 3 breadboard.
+# Source of truth for parts and on-board status: ../BOM.md
+# Regenerate: host-daisy/hardware/.venv/bin/wireviz breadboard.yml
+
+title: Daisy Seed 3 breadboard (assembled)
+notes: |
+  Logical wiring only (not a physical breadboard layout).
+  Items marked [ ] in BOM.md (bench filter pots) are omitted here.
+
+metadata:
+  project: stone-raft
+  description: Primary test breadboard — button, LED, OLED, TRRS headphone path
+
+connectors:
+  SEED:
+    type: Daisy Seed 3
+    subtype: breadboard header
+    pinlabels:
+      - "12 D11/SCK"
+      - "13 D12/SDA"
+      - "18 Audio Out 1"
+      - "19 Audio Out 2"
+      - "20 AGND"
+      - "22 D15"
+      - "31 D24"
+      - "38 3V3 dig"
+      - "40 GND"
+
+  BTN:
+    type: Tactile switch
+    pinlabels: [A, B]
+
+  R_LED:
+    type: Resistor
+    subtype: 330 Ω–1 kΩ
+    pinlabels: [in, out]
+
+  LED:
+    type: LED
+    pinlabels: [anode, cathode]
+
+  OLED:
+    type: SSD1306 OLED
+    subtype: 4-pin I2C
+    pinlabels: [GND, VDD, SCK, SDA]
+
+  C_L:
+    type: Electrolytic capacitor
+    subtype: 10 µF
+    pinlabels: ["+ (from codec)", "− (to jack)"]
+
+  R_L:
+    type: Resistor
+    subtype: 100 Ω
+    pinlabels: [in, out]
+
+  C_R:
+    type: Electrolytic capacitor
+    subtype: 10 µF
+    pinlabels: ["+ (from codec)", "− (to jack)"]
+
+  R_R:
+    type: Resistor
+    subtype: 100 Ω
+    pinlabels: [in, out]
+
+  JACK:
+    type: TRRS 3.5 mm breakout
+    pinlabels: [TIP, RING1, RING2, SLEEVE]
+
+cables:
+  W_BTN_A:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [BU]
+  W_BTN_B:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [BK]
+  W_LED_IN:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [GN]
+  W_LED_OUT:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [GN]
+  W_LED_GND:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [BK]
+  W_OLED_GND:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [BK]
+  W_OLED_VDD:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [RD]
+  W_OLED_SCK:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [YE]
+  W_OLED_SDA:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [OG]
+  W_AGND_DGND:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [BK]
+    notes: AGND ↔ DGND tie (Seed datasheet)
+  W_L_CODEC:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [WH]
+  W_L_CAP_RES:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [WH]
+  W_L_RES_JACK:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [WH]
+  W_R_CODEC:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [WH]
+  W_R_CAP_RES:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [WH]
+  W_R_RES_JACK:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [WH]
+  W_RING2_GND:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [BK]
+  W_SLEEVE_GND:
+    wirecount: 1
+    length: 0.1
+    gauge: 0.14 mm2
+    colors: [BK]
+
+connections:
+  # Button D15 → GND (firmware internal pull-up)
+  -
+    - SEED: ["22 D15"]
+    - W_BTN_A: [1]
+    - BTN: [A]
+  -
+    - BTN: [B]
+    - W_BTN_B: [1]
+    - SEED: ["40 GND"]
+
+  # LED D24 → resistor → LED → GND
+  -
+    - SEED: ["31 D24"]
+    - W_LED_IN: [1]
+    - R_LED: [in]
+  -
+    - R_LED: [out]
+    - W_LED_OUT: [1]
+    - LED: [anode]
+  -
+    - LED: [cathode]
+    - W_LED_GND: [1]
+    - SEED: ["40 GND"]
+
+  # OLED I2C (SSD1306 @ 0x3C)
+  -
+    - SEED: ["40 GND"]
+    - W_OLED_GND: [1]
+    - OLED: [GND]
+  -
+    - SEED: ["38 3V3 dig"]
+    - W_OLED_VDD: [1]
+    - OLED: [VDD]
+  -
+    - SEED: ["12 D11/SCK"]
+    - W_OLED_SCK: [1]
+    - OLED: [SCK]
+  -
+    - SEED: ["13 D12/SDA"]
+    - W_OLED_SDA: [1]
+    - OLED: [SDA]
+
+  # AGND ↔ DGND jumper
+  -
+    - SEED: ["20 AGND"]
+    - W_AGND_DGND: [1]
+    - SEED: ["40 GND"]
+
+  # Headphone path — left (TIP): pin 18 → 10 µF → 100 Ω → TIP
+  -
+    - SEED: ["18 Audio Out 1"]
+    - W_L_CODEC: [1]
+    - C_L: ["+ (from codec)"]
+  -
+    - C_L: ["− (to jack)"]
+    - W_L_CAP_RES: [1]
+    - R_L: [in]
+  -
+    - R_L: [out]
+    - W_L_RES_JACK: [1]
+    - JACK: [TIP]
+
+  # Headphone path — right (RING1): pin 19 → 10 µF → 100 Ω → RING1
+  -
+    - SEED: ["19 Audio Out 2"]
+    - W_R_CODEC: [1]
+    - C_R: ["+ (from codec)"]
+  -
+    - C_R: ["− (to jack)"]
+    - W_R_CAP_RES: [1]
+    - R_R: [in]
+  -
+    - R_R: [out]
+    - W_R_RES_JACK: [1]
+    - JACK: [RING1]
+
+  # Headphone grounds
+  -
+    - SEED: ["20 AGND"]
+    - W_RING2_GND: [1]
+    - JACK: [RING2]
+  -
+    - SEED: ["20 AGND"]
+    - W_SLEEVE_GND: [1]
+    - JACK: [SLEEVE]
