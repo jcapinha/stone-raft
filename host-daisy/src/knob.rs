@@ -1,7 +1,4 @@
-//! Cutoff and resonance maps, plus the freeze/track rule for a noisy ADC count.
-//!
-//! The audio callback never sees raw counts. A pot task publishes one frozen or
-//! live count, and these functions turn that count into Hertz or a 0..1 level.
+//! Cutoff and resonance from an ADC count. The freeze window is noise, not a step size.
 
 use libm::powf;
 
@@ -17,8 +14,7 @@ pub const STILL_MS: u32 = 40;
 pub const CUTOFF_MIN_HZ: f32 = 20.0;
 pub const CUTOFF_MAX_HZ: f32 = 16_000.0;
 
-/// Logarithmic cutoff. Full left is 20 Hz, full right is 16 kHz.
-/// The middle of the turn is near 570 Hz.
+/// Logarithmic cutoff, 20 Hz at count 0 and 16 kHz at full scale.
 pub fn cutoff_hz(count: u16) -> f32 {
     let t = count as f32 / ADC_MAX_COUNT as f32;
     CUTOFF_MIN_HZ * powf(CUTOFF_MAX_HZ / CUTOFF_MIN_HZ, t)
@@ -35,27 +31,20 @@ enum Phase {
     Tracking { last: u16, still_ms: u32 },
 }
 
-/// Holds the last pot value while the ADC wanders inside [`FREEZE_WINDOW`].
-///
-/// A turn that leaves the window is followed one count at a time. The window
-/// is not a step size.
+/// Frozen inside [`FREEZE_WINDOW`] of the anchor. A turn past that follows every count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PotTracker {
     phase: Phase,
 }
 
 impl PotTracker {
-    /// First sample. Audio should publish this count before the callback starts.
     pub fn start(count: u16) -> Self {
         Self {
             phase: Phase::Frozen { anchor: count },
         }
     }
 
-    /// `dt_ms` is how long since the previous sample (about 1 ms on the Seed).
-    ///
-    /// Returns the count to map. Inside the freeze window that is the anchor,
-    /// not the noisy reading.
+    /// `dt_ms` is the time since the previous sample. Inside the window this returns the anchor.
     pub fn push(&mut self, count: u16, dt_ms: u32) -> u16 {
         match self.phase {
             Phase::Frozen { anchor } => {

@@ -231,9 +231,9 @@ Before either flash command, hold BOOT, press and release RESET, then release BO
 
 ## Daisy breadboard play
 
-`breadboard-led` runs the synth engine through the Seed 3 codec, plus a 0.96" I2C OLED and the breadboard button/LED. Instruction cache on, data cache **off** (unlike `audio-probe`). Boot flashes the LED three times. OLED uses blocking I2C at 400 kHz with a 200 ms timeout so a missing screen cannot freeze the button. Hello is drawn, stays for 3 seconds, then the screen sleeps, all before audio starts. After that the Seed does not talk to the OLED. Audio uses the daisy-embassy Seed 3 callback. First button press plays C4, E4, G4 (1 s gate, 2 s rest) at volume 1.0. Later presses apply `random`, then replay, still at volume 1.0. The LED follows each 1 s gate. A continuous rapid blink means audio stopped after an interface error and the board needs a reset.
+`breadboard-led` runs the synth engine through the Seed 3 codec, plus a 0.96" I2C OLED and the breadboard button/LED. Instruction cache on, data cache **off** (unlike `audio-probe`). Boot flashes the LED three times. OLED uses blocking I2C at 400 kHz with a 200 ms timeout so a missing screen cannot freeze the button. Hello is drawn, stays for 3 seconds, then the screen sleeps, all before audio starts. After that the Seed does not talk to the OLED. Audio uses the daisy-embassy Seed 3 callback. The first button press loops C4, E4, G4 (1 s gate, 2 s rest, then 2 s before the next loop) at volume 1.0. A press during that loop applies `random` and starts the loop again, still at volume 1.0. Cutoff and resonance follow the two bench pots the whole time, including over a random patch. The LED follows each 1 s gate. A continuous rapid blink means audio stopped after an interface error and the board needs a reset.
 
-Audio is line-level on Audio Out 1 and 2 (pins 18 and 19) and AGND (pin 20). Firmware copies the mono mix to both codec channels. A TRRS breakout plus 10 µF caps and 100 Ω resistors can drive headphones. OLED power is 3.3 V digital (pin 38) and GND (pin 40). Do not use analog 3.3 V on pin 21.
+Audio is line-level on Audio Out 1 and 2 (pins 18 and 19) and AGND (pin 20). Firmware copies the mono mix to both codec channels. A TRRS breakout plus 10 µF caps and 100 Ω resistors can drive headphones. OLED power is 3.3 V digital (pin 38) and GND (pin 40). The pots use analog 3.3 V on pin 21. The OLED and the button do not.
 
 Wiring walkthrough for another agent: [`host-daisy/docs/BREADBOARD_SETUP_PROMPT.md`](host-daisy/docs/BREADBOARD_SETUP_PROMPT.md). Parts, TRRS wiring, and stock: [`host-daisy/BOM.md`](host-daisy/BOM.md).
 
@@ -259,7 +259,7 @@ The generated `.bin` is disposable. Flashing it replaces the current internal pr
 
 Two B10K pots set cutoff and resonance before you play a note. Cutoff is logarithmic, about 20 Hz full left to 16 kHz full right. Resonance is linear, 0 to 1. Wiring: [`host-daisy/docs/filter-pots.md`](host-daisy/docs/filter-pots.md). Unplug USB-C before wiring.
 
-USB MIDI exists only while `bench-play` is running. The device name is `stone-raft`. The same USB-C cable still powers the board. To flash again, hold BOOT and reset so DFU comes back. `breadboard-led` and `audio-probe` are unchanged.
+USB MIDI exists only while `bench-play` is running. The device name is `stone-raft`. The same USB-C cable still powers the board. To flash again, hold BOOT and reset so DFU comes back. `breadboard-led` uses these same pots.
 
 One-time ARM/`dfu-util` setup is the same as double blink. When the repository is under `\\wsl$\...`, set `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` as shown in the Windows host section before building. Before flashing from WSL, put the Seed into DFU mode and attach the device shown by `usbipd list`.
 
@@ -295,7 +295,7 @@ $env:CARGO_INCREMENTAL = "0"
 cargo run -p host-windows --bin midi-forward
 ```
 
-From WSL, flash with the commands above, then run `midi-forward` in PowerShell. There is no WSL build of the forwarder to use.
+From WSL, flash with the commands above, then run `midi-forward` in PowerShell.
 
 ## Tests
 

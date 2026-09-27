@@ -22,9 +22,9 @@ Edit the **On board** column as you add or remove parts. `[x]` means it is on th
 | [x] | 2 | Resistor | 100 Ω | After each cap, toward the jack | `audio-probe`, `breadboard-led`, `bench-play` |
 | [x] | 1 | AGND ↔ DGND jumper | Required by the Seed datasheet | AGND pin 20 → GND pin 40 | `audio-probe`, `breadboard-led`, `bench-play` |
 | [x] | 1 | SLEEVE → AGND jumper | Headphone sleeve return | SLEEVE → AGND pin 20 | `audio-probe`, `breadboard-led`, `bench-play` |
-| [ ] | 2 | WH148 pot, B10K | Linear 10 kΩ. Bench cutoff and resonance, from the stock kit. Not the full panel. | Outer pins to pin 21 (3V3 analog) and pin 20 (AGND). See [`docs/filter-pots.md`](docs/filter-pots.md). | `bench-play` |
-| [ ] | 2 | Resistor | 1 kΩ | Series from each wiper to the ADC pin | `bench-play` |
-| [ ] | 2 | Ceramic capacitor | 100 nF. No stripe, no polarity. | Each ADC pin to AGND pin 20. Do not use the optocoupler’s 100 nF for these. | `bench-play` |
+| [x] | 2 | WH148 pot, B10K | Linear 10 kΩ. Bench cutoff and resonance, from the stock kit. Not the full panel. | Outer pins to pin 21 (3V3 analog) and pin 20 (AGND). See [`docs/filter-pots.md`](docs/filter-pots.md). | `bench-play`, `breadboard-led` |
+| [x] | 2 | Resistor | 1 kΩ | Series from each wiper to the ADC pin | `bench-play`, `breadboard-led` |
+| [x] | 2 | Ceramic capacitor | 100 nF. No stripe, no polarity. | Each ADC pin to AGND pin 20. Do not use the optocoupler’s 100 nF for these. | `bench-play`, `breadboard-led` |
 
 
 OLED modules usually already have I2C pull-ups. Do not add extra ones unless the screen never answers.
@@ -138,7 +138,7 @@ Use this when restocking the current breadboard.
 - [x] 100 Ω resistor ×2
 - [x] AGND–DGND jumper
 - [x] SLEEVE–AGND jumper
-- [ ] WH148 B10K pot ×2 (bench cutoff and resonance, not on the board until wired)
-- [ ] 1 kΩ resistor ×2 (wiper to ADC)
-- [ ] 100 nF ceramic ×2 (ADC pin to AGND)
+- [x] WH148 B10K pot ×2 (bench cutoff and resonance)
+- [x] 1 kΩ resistor ×2 (wiper to ADC)
+- [x] 100 nF ceramic ×2 (ADC pin to AGND)
 - [x] 100 nF ceramic ×1 kept for the MIDI optocoupler (not one of the two bench caps)

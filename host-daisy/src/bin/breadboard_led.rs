@@ -11,22 +11,28 @@
 //! - Audio Out 1 = physical pin 18. TRRS TIP. Same mono mix copied to both codec channels.
 //! - Audio Out 2 = physical pin 19. TRRS RING1.
 //! - AGND = physical pin 20. TRRS RING2 (and SLEEVE if needed). Tie to DGND pin 40.
-//! - 3V3 digital = physical pin 38. OLED VDD. Do not use analog 3V3 on pin 21.
+//! - 3V3 analog = physical pin 21. Pot ends, shared with AGND pin 20. Not for the OLED or the button.
+//! - Cutoff wiper, through 1 kΩ: A1 / D16, physical pin 23. 100 nF from that pin to AGND.
+//! - Resonance wiper, through 1 kΩ: A2 / D17, physical pin 24. Its own 100 nF to AGND.
+//! - 3V3 digital = physical pin 38. OLED VDD.
 //! - GND = physical pin 40. Shared ground for OLED, LED cathode, and button.
 //!
 //! Boot flashes the breadboard LED three times. OLED uses blocking I2C at 400 kHz
 //! with a 200 ms timeout so a missing screen cannot freeze the button. Hello is
 //! drawn, held for 3 s, then the screen sleeps, all before audio starts. After
 //! that the Seed does not talk to the OLED. Volume is 1.0 on first press and
-//! after `random`. Each press plays C4-E4-G4 with the LED on during each 1 s
-//! gate. Later presses run `random`, then the same arpeggio. Audio uses the
-//! daisy-embassy Seed 3 callback (TX and RX paced to the codec). An SAI error
-//! stops audio and changes the LED to a continuous rapid blink until reset.
+//! after `random`. The first press loops C4-E4-G4 (1 s gate, 2 s rest, then 2 s
+//! before the next loop). A press during that loop runs `random` and starts the
+//! loop again. The two pots replace cutoff and resonance on every audio callback,
+//! including inside a random patch. Audio uses the daisy-embassy Seed 3 callback
+//! (TX and RX paced to the codec). An SAI error stops audio and changes the LED
+//! to a continuous rapid blink until reset.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use cortex_m::peripheral::Peripherals;
 use daisy_embassy::audio::AudioPeripherals;
+use daisy_embassy::hal::adc::{Adc, SampleTime};
 use daisy_embassy::hal::gpio::{Input, Level, Output, Pull, Speed};
 use daisy_embassy::hal::i2c::{self, I2c};
 use daisy_embassy::hal::time::Hertz;
@@ -39,8 +45,9 @@ use embedded_graphics::mono_font::ascii::FONT_5X8;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::{Baseline, Text};
-use engine::{InstanceEvent, Mixer, MixerEvent, patch_events, random_patch};
+use engine::{ControlEvent, InstanceEvent, Mixer, MixerEvent, patch_events, random_patch};
 use heapless::spsc::{Consumer, Producer, Queue};
+use host_daisy::{PotTracker, cutoff_hz, resonance};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use ssd1306::mode::{BufferedGraphicsMode, DisplayConfig};
@@ -57,6 +64,9 @@ const ENGINE_INSTANCE: u8 = 1;
 const NOTES: [u8; 3] = [60, 64, 67];
 const GATE_MS: u64 = 1_000;
 const REST_MS: u64 = 2_000;
+const LOOP_GAP_MS: u64 = 2_000;
+const POT_PERIOD_MS: u32 = 1;
+const ADC_SAMPLE_TIME: SampleTime = SampleTime::CYCLES810_5;
 const HELLO_MS: u64 = 3_000;
 const OLED_INIT_TIMEOUT_MS: u64 = 200;
 const BOOT_FLASH_MS: u64 = 100;
@@ -76,6 +86,8 @@ static MIXER: StaticCell<Mixer> = StaticCell::new();
 static EVENT_QUEUE: StaticCell<Queue<MixerEvent, EVENT_QUEUE_CAP>> = StaticCell::new();
 static AUDIO_ERROR: AtomicBool = AtomicBool::new(false);
 static GATE_LED_ON: AtomicBool = AtomicBool::new(false);
+static CUTOFF_BITS: AtomicU32 = AtomicU32::new(0);
+static RESONANCE_BITS: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(not(target_os = "none"))]
 fn main() {}
@@ -115,10 +127,41 @@ async fn run(spawner: Spawner) {
         oled_set_on(display, false);
     }
 
+    // 16-bit is the H7 ADC reset resolution, matching `ADC_MAX_COUNT`.
+    let mut adc = Adc::new(p.ADC1);
+    let mut cutoff_pin = board.pins.d16;
+    let mut resonance_pin = board.pins.d17;
+    let cutoff_count = adc.blocking_read(&mut cutoff_pin, ADC_SAMPLE_TIME);
+    let resonance_count = adc.blocking_read(&mut resonance_pin, ADC_SAMPLE_TIME);
+    publish(cutoff_count, resonance_count);
+
     spawner.spawn(unwrap!(audio_loop(board.audio_peripherals, consumer)));
     spawner.spawn(unwrap!(status_led_loop(led)));
+    spawner.spawn(unwrap!(ui_loop(button, producer)));
 
-    ui_loop(button, producer).await;
+    let mut cutoff_tracker = PotTracker::start(cutoff_count);
+    let mut resonance_tracker = PotTracker::start(resonance_count);
+    loop {
+        Timer::after_millis(POT_PERIOD_MS as u64).await;
+        let cutoff_count = adc.blocking_read(&mut cutoff_pin, ADC_SAMPLE_TIME);
+        let resonance_count = adc.blocking_read(&mut resonance_pin, ADC_SAMPLE_TIME);
+        let cutoff_count = cutoff_tracker.push(cutoff_count, POT_PERIOD_MS);
+        let resonance_count = resonance_tracker.push(resonance_count, POT_PERIOD_MS);
+        publish(cutoff_count, resonance_count);
+    }
+}
+
+fn publish(cutoff_count: u16, resonance_count: u16) {
+    store_f32(&CUTOFF_BITS, cutoff_hz(cutoff_count));
+    store_f32(&RESONANCE_BITS, resonance(resonance_count));
+}
+
+fn store_f32(cell: &AtomicU32, value: f32) {
+    cell.store(value.to_bits(), Ordering::Relaxed);
+}
+
+fn load_f32(cell: &AtomicU32) -> f32 {
+    f32::from_bits(cell.load(Ordering::Relaxed))
 }
 
 async fn boot_flash(led: &mut Output<'static>) {
@@ -150,6 +193,7 @@ async fn audio_loop(audio: AudioPeripherals<'static>, mut consumer: Consumer<'st
             while let Some(event) = consumer.dequeue() {
                 mixer.apply(event);
             }
+            apply_pots(mixer);
             for chunk in output.chunks_exact_mut(2) {
                 let bits = f32_to_u24(mixer.next_sample());
                 chunk[0] = bits;
@@ -190,6 +234,22 @@ fn oled_set_on(display: &mut OledDisplay, on: bool) {
     let _ = display.set_display_on(on);
 }
 
+fn apply_pots(mixer: &mut Mixer) {
+    mixer.apply(MixerEvent::ToInstance {
+        instance: ENGINE_INSTANCE,
+        event: InstanceEvent::Engine(ControlEvent::SetCutoff {
+            hz: load_f32(&CUTOFF_BITS),
+        }),
+    });
+    mixer.apply(MixerEvent::ToInstance {
+        instance: ENGINE_INSTANCE,
+        event: InstanceEvent::Engine(ControlEvent::SetResonance {
+            amount: load_f32(&RESONANCE_BITS),
+        }),
+    });
+}
+
+#[embassy_executor::task]
 async fn ui_loop(button: Input<'static>, mut producer: Producer<'static, MixerEvent>) {
     let mut first_press = true;
 
@@ -199,8 +259,8 @@ async fn ui_loop(button: Input<'static>, mut producer: Producer<'static, MixerEv
             apply_random(&mut producer);
         }
         first_press = false;
-        play_arpeggio(&mut producer).await;
         wait_for_release(&button).await;
+        play_until_press(&button, &mut producer).await;
     }
 }
 
@@ -232,30 +292,57 @@ fn show_hello(display: &mut OledDisplay) {
     oled_flush(display);
 }
 
-async fn play_arpeggio(producer: &mut Producer<'static, MixerEvent>) {
+async fn play_until_press(button: &Input<'_>, producer: &mut Producer<'static, MixerEvent>) {
     let last = NOTES.len() - 1;
-    for (index, note) in NOTES.iter().copied().enumerate() {
-        GATE_LED_ON.store(true, Ordering::Relaxed);
-        enqueue(
-            producer,
-            MixerEvent::MidiNoteOn {
-                channel: LISTEN_CHANNEL,
-                note,
-                velocity: NOTE_VELOCITY,
-            },
-        );
-        Timer::after_millis(GATE_MS).await;
-        enqueue(
-            producer,
-            MixerEvent::MidiNoteOff {
-                channel: LISTEN_CHANNEL,
-                note,
-            },
-        );
-        GATE_LED_ON.store(false, Ordering::Relaxed);
-        if index != last {
-            Timer::after_millis(REST_MS).await;
+    loop {
+        for (index, note) in NOTES.iter().copied().enumerate() {
+            GATE_LED_ON.store(true, Ordering::Relaxed);
+            enqueue(
+                producer,
+                MixerEvent::MidiNoteOn {
+                    channel: LISTEN_CHANNEL,
+                    note,
+                    velocity: NOTE_VELOCITY,
+                },
+            );
+            if wait_or_press(button, GATE_MS).await {
+                end_note(producer, note);
+                return;
+            }
+            end_note(producer, note);
+            let gap = if index == last { LOOP_GAP_MS } else { REST_MS };
+            if wait_or_press(button, gap).await {
+                return;
+            }
         }
+    }
+}
+
+fn end_note(producer: &mut Producer<'static, MixerEvent>, note: u8) {
+    enqueue(
+        producer,
+        MixerEvent::MidiNoteOff {
+            channel: LISTEN_CHANNEL,
+            note,
+        },
+    );
+    GATE_LED_ON.store(false, Ordering::Relaxed);
+}
+
+/// True when the button is pressed before `total_ms` elapses.
+async fn wait_or_press(button: &Input<'_>, total_ms: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(total_ms);
+    loop {
+        if button.is_low() {
+            Timer::after_millis(DEBOUNCE_MS).await;
+            if button.is_low() {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        Timer::after_millis(POLL_MS).await;
     }
 }
 

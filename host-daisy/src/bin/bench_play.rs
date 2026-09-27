@@ -61,7 +61,7 @@ async fn run(spawner: Spawner) {
     let board = new_daisy_board!(p);
 
     let mut core = Peripherals::take().unwrap();
-    // Same listen path as breadboard-led: instruction cache on, data cache off.
+    // Instruction cache on, data cache off.
     core.SCB.enable_icache();
 
     // 16-bit is the H7 ADC reset resolution, matching `ADC_MAX_COUNT`.
