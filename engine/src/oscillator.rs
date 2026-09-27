@@ -96,36 +96,17 @@ impl Oscillator {
 
     #[inline(always)]
     pub(crate) fn sample_saw(&self) -> f32 {
-        let t = self.phase;
-        let dt = self.phase_increment;
-        let mut value = 2.0 * t - 1.0;
-        value -= poly_blep(t, dt);
-        value
+        saw_sample(self.phase, self.phase_increment)
     }
 
     #[inline(always)]
     pub(crate) fn sample_square(&self) -> f32 {
-        let t = self.phase;
-        let dt = self.phase_increment;
-        let pw = self.pulse_width;
-        let mut value = if t < pw { 1.0 } else { -1.0 };
-        value += poly_blep(t, dt);
-        value -= poly_blep(wrap_unit_sum(t, 1.0 - pw), dt);
-        value
+        square_sample(self.phase, self.phase_increment, self.pulse_width)
     }
 
     #[inline(always)]
     pub(crate) fn sample_triangle(&self) -> f32 {
-        let t = self.phase;
-        let dt = self.phase_increment;
-        let mut value = if t < 0.5 {
-            4.0 * t - 1.0
-        } else {
-            3.0 - 4.0 * t
-        };
-        value += 8.0 * dt * poly_blamp(t, dt);
-        value -= 8.0 * dt * poly_blamp(wrap_unit_sum(t, 0.5), dt);
-        value
+        triangle_sample(self.phase, self.phase_increment)
     }
 
     #[inline(always)]
@@ -135,21 +116,57 @@ impl Oscillator {
 
     #[inline(always)]
     pub(crate) fn advance_phase(&mut self) {
-        self.phase += self.phase_increment;
-        if self.phase >= 1.0 {
-            self.phase -= 1.0;
-        }
+        self.phase = step_phase(self.phase, self.phase_increment);
     }
 
-    #[cfg(test)]
     pub(crate) fn phase(&self) -> f32 {
         self.phase
     }
 
-    #[cfg(test)]
+    pub(crate) fn set_phase(&mut self, phase: f32) {
+        self.phase = phase;
+    }
+
     pub(crate) fn phase_increment(&self) -> f32 {
         self.phase_increment
     }
+
+    pub(crate) fn pulse_width(&self) -> f32 {
+        self.pulse_width
+    }
+}
+
+#[inline(always)]
+pub(crate) fn saw_sample(phase: f32, dt: f32) -> f32 {
+    let mut value = 2.0 * phase - 1.0;
+    value -= poly_blep(phase, dt);
+    value
+}
+
+#[inline(always)]
+pub(crate) fn square_sample(phase: f32, dt: f32, pulse_width: f32) -> f32 {
+    let mut value = if phase < pulse_width { 1.0 } else { -1.0 };
+    value += poly_blep(phase, dt);
+    value -= poly_blep(wrap_unit_sum(phase, 1.0 - pulse_width), dt);
+    value
+}
+
+#[inline(always)]
+pub(crate) fn triangle_sample(phase: f32, dt: f32) -> f32 {
+    let mut value = if phase < 0.5 {
+        4.0 * phase - 1.0
+    } else {
+        3.0 - 4.0 * phase
+    };
+    value += 8.0 * dt * poly_blamp(phase, dt);
+    value -= 8.0 * dt * poly_blamp(wrap_unit_sum(phase, 0.5), dt);
+    value
+}
+
+#[inline(always)]
+pub(crate) fn step_phase(phase: f32, dt: f32) -> f32 {
+    let phase = phase + dt;
+    if phase >= 1.0 { phase - 1.0 } else { phase }
 }
 
 /// `phase + offset` is in 0..2 when both inputs are in 0..1. One subtract wraps it.

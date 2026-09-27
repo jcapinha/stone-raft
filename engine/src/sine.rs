@@ -42,6 +42,7 @@ const fn quarter_table() -> [f32; QUARTER_LEN + 1] {
 ///
 /// Oscillators advance by at most one cycle per sample, so a phase in `1..2`
 /// wraps with one subtract. A value that lands on the end of the table wraps to zero.
+/// Only the quarter-cycle that `phase` lands in is interpolated.
 #[inline(always)]
 pub(crate) fn sine_from_phase(phase: f32) -> f32 {
     let phase = if phase >= 1.0 { phase - 1.0 } else { phase };
@@ -52,18 +53,18 @@ pub(crate) fn sine_from_phase(phase: f32) -> f32 {
         index = 0;
         frac = 0.0;
     }
-    let quadrant = (index >> 8) & 3;
+    let quadrant = index >> 8;
     let i = (index & 255) as usize;
-    let rising = SINE_QUARTER[i] + (SINE_QUARTER[i + 1] - SINE_QUARTER[i]) * frac;
-    let falling = SINE_QUARTER[QUARTER_LEN - i]
-        + (SINE_QUARTER[QUARTER_LEN - 1 - i] - SINE_QUARTER[QUARTER_LEN - i]) * frac;
-    let sample = match quadrant {
-        0 => rising,
-        1 => falling,
-        2 => -rising,
-        3 => -falling,
-        _ => 0.0,
+    // Quadrants 0 and 2 walk the table forward. 1 and 3 walk it backward.
+    let sample = if quadrant & 1 == 0 {
+        let y0 = SINE_QUARTER[i];
+        y0 + (SINE_QUARTER[i + 1] - y0) * frac
+    } else {
+        let i0 = QUARTER_LEN - i;
+        let y0 = SINE_QUARTER[i0];
+        y0 + (SINE_QUARTER[i0 - 1] - y0) * frac
     };
+    let sample = if quadrant < 2 { sample } else { -sample };
     sample.clamp(-1.0, 1.0)
 }
 

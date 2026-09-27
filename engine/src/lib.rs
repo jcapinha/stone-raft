@@ -484,11 +484,25 @@ impl Engine {
     /// Sums active voices and applies the engine's fixed output calibration.
     #[inline]
     pub fn next_sample(&mut self) -> f32 {
+        let mut sample = [0.0];
+        self.add_block(&mut sample, 1.0);
+        sample[0]
+    }
+
+    /// Adds this engine into `output`, one sample per entry, scaled by `volume`.
+    pub(crate) fn add_block(&mut self, output: &mut [f32], volume: f32) {
         #[cfg(test)]
         {
-            self.next_sample_calls = self.next_sample_calls.wrapping_add(1);
+            self.next_sample_calls = self.next_sample_calls.wrapping_add(output.len() as u32);
         }
-        self.voices.render_sample(&self.params) * ENGINE_OUTPUT_GAIN
+        for chunk in output.chunks_mut(voices::CONTROL_BLOCK_SAMPLES) {
+            let mut dry = [0.0f32; voices::CONTROL_BLOCK_SAMPLES];
+            let count = chunk.len();
+            self.voices.add_dry(&self.params, &mut dry[..count]);
+            for (slot, sample) in chunk.iter_mut().zip(dry) {
+                *slot += sample * ENGINE_OUTPUT_GAIN * volume;
+            }
+        }
     }
 }
 

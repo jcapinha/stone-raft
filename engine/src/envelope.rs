@@ -1,3 +1,55 @@
+/// Amp envelope numbers a voice holds in locals while it renders a block.
+#[derive(Clone, Copy)]
+pub(crate) struct AmpRun {
+    stage: EnvelopeStage,
+    level: f32,
+    attack_coeff: f32,
+    decay_coeff: f32,
+    release_coeff: f32,
+    sustain: f32,
+}
+
+impl AmpRun {
+    #[inline(always)]
+    pub(crate) fn is_idle(self) -> bool {
+        self.stage == EnvelopeStage::Idle
+    }
+}
+
+#[inline(always)]
+pub(crate) fn step_amp(run: &mut AmpRun) -> f32 {
+    match run.stage {
+        EnvelopeStage::Idle => {
+            run.level = 0.0;
+        }
+        EnvelopeStage::Attack => {
+            run.level += (Adsr::ATTACK_TARGET - run.level) * run.attack_coeff;
+            if run.level >= 1.0 {
+                run.level = 1.0;
+                run.stage = EnvelopeStage::Decay;
+            }
+        }
+        EnvelopeStage::Decay => {
+            run.level += (run.sustain - run.level) * run.decay_coeff;
+            if (run.level - run.sustain).abs() < Adsr::IDLE_LEVEL {
+                run.level = run.sustain;
+                run.stage = EnvelopeStage::Sustain;
+            }
+        }
+        EnvelopeStage::Sustain => {
+            run.level = run.sustain;
+        }
+        EnvelopeStage::Release => {
+            run.level += (0.0 - run.level) * run.release_coeff;
+            if run.level <= Adsr::IDLE_LEVEL {
+                run.level = 0.0;
+                run.stage = EnvelopeStage::Idle;
+            }
+        }
+    }
+    run.level
+}
+
 /// Envelope stage. For the amp envelope, Idle means the voice is silent and free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvelopeStage {
@@ -85,39 +137,33 @@ impl Adsr {
         self.level = 0.0;
     }
 
+    pub(crate) fn run_state(&self) -> AmpRun {
+        AmpRun {
+            stage: self.stage,
+            level: self.level,
+            attack_coeff: self.attack_coeff,
+            decay_coeff: self.decay_coeff,
+            release_coeff: self.release_coeff,
+            sustain: self.sustain,
+        }
+    }
+
+    pub(crate) fn set_run_state(&mut self, run: AmpRun) {
+        self.stage = run.stage;
+        self.level = run.level;
+        self.attack_coeff = run.attack_coeff;
+        self.decay_coeff = run.decay_coeff;
+        self.release_coeff = run.release_coeff;
+        self.sustain = run.sustain;
+    }
+
     /// Advances one sample and returns the current level in 0..1.
     #[inline(always)]
     pub fn next_level(&mut self) -> f32 {
-        match self.stage {
-            EnvelopeStage::Idle => {
-                self.level = 0.0;
-            }
-            EnvelopeStage::Attack => {
-                self.level += (Self::ATTACK_TARGET - self.level) * self.attack_coeff;
-                if self.level >= 1.0 {
-                    self.level = 1.0;
-                    self.stage = EnvelopeStage::Decay;
-                }
-            }
-            EnvelopeStage::Decay => {
-                self.level += (self.sustain - self.level) * self.decay_coeff;
-                if (self.level - self.sustain).abs() < Self::IDLE_LEVEL {
-                    self.level = self.sustain;
-                    self.stage = EnvelopeStage::Sustain;
-                }
-            }
-            EnvelopeStage::Sustain => {
-                self.level = self.sustain;
-            }
-            EnvelopeStage::Release => {
-                self.level += (0.0 - self.level) * self.release_coeff;
-                if self.level <= Self::IDLE_LEVEL {
-                    self.level = 0.0;
-                    self.stage = EnvelopeStage::Idle;
-                }
-            }
-        }
-        self.level
+        let mut run = self.run_state();
+        let level = step_amp(&mut run);
+        self.set_run_state(run);
+        level
     }
 
     /// Level after the first of `samples` steps. The stored level is where all of them land.
