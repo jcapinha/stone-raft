@@ -24,7 +24,6 @@ embassy-executor = { version = "0.10", features = [
 embassy-time = "0.5"
 embedded-graphics = "0.8"
 engine = { path = "../engine" }
-grounded = "0.2.1"
 heapless = { version = "0.9", default-features = false }
 panic-probe = { version = "1", features = ["print-defmt"] }
 rand = { version = "0.8", default-features = false, features = ["small_rng"] }
@@ -40,5 +39,11 @@ bench = false
 [[bin]]
 name = "breadboard-led"
 path = "src/bin/breadboard_led.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "audio-probe"
+path = "src/bin/audio_probe.rs"
 test = false
 bench = false

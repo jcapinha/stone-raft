@@ -57,11 +57,12 @@ Where an assignable envelope or LFO writes. Current dests: off, resonance, pitch
 How far an envelope moves its destination. Filter amount is octaves. Assignable amount is octaves for pitch and cutoff, and linear for resonance, pulse width, and amp.
 
 **LFO**:
-A slow repeating wave used as a modulator. It keeps moving a destination while notes sound, instead of running once per note like an envelope.
+A slow repeating wave used as a modulator. One shared phase per engine keeps moving while that engine is on, including between notes, instead of running once per note like an envelope.
 _Avoid_: using “oscillator” alone for this
 
 **Assignable LFO**:
-One of two LFOs per engine. Settings are per engine. Each voice runs its own pair. Destination uses the assignable destination list.
+One of two LFOs per engine. Settings and phase are per engine. Every voice of that engine reads the same level. Destination uses the assignable destination list.
+_Avoid_: a private LFO phase per note
 
 **Envelope link**:
 When on, `amp` ADSR commands also write filter and assignable envelope times. A `fenv` or `asenv` time command turns link off.
@@ -100,6 +101,16 @@ OLED plot of recent mixer samples while notes sound. Not a triggered lab oscillo
 **Condensed patch card**:
 Eight-line OLED summary of the current patch (volume, osc mix, filter, amp, a few dests). Not a full laptop `show` dump.
 
+**Panel lane**:
+The planned front panel is one strip of pots. A 1–4 selector chooses which engine that strip edits. Other engines can stay on and keep sounding; you just are not twiddling them at the same time.
+_Avoid_: channel strip (unless meaning MIDI channel)
+
+**Envelope bank**:
+One 3-way selector (amp, filter env, assignable env) plus four pots for attack, decay, sustain, and release on the selected envelope. Same “pick target, then tweak” pattern as engine pick. On the panel this bank sits under the oscillators (from sine rightward) and under the filter, as its own section.
+
+**Pickup**:
+Optional later pot rule: after `random` or an engine switch, turning a knob does nothing until it passes the stored param value, then it follows. Not required. Encoders do not need this.
+
 ## Decisions
 
 **Rust as the implementation language**
@@ -129,16 +140,22 @@ Each voice has a sine sub mixed after the normalized at-pitch blend and before t
 Three ADSRs per voice. Amp owns voice lifetime. Cutoff uses exponential signed-octave modulation; stacking adds octave offsets. Assignable dests are off, resonance, pitch, cutoff, pulse width, and amp. Amp dest is extra loudness only. The dedicated amp ADSR still owns voice lifetime. Times are independent. `env copy` snapshots amp times onto the other two. `env link` snaps then follows `amp` time commands; a `fenv` or `asenv` time command unlinks. Shared `env vel` defaults to 0 and scales the three ADSR amounts only. Separate velocity controls can be added later if needed. Key tracking is not in this slice.
 
 **Two assignable LFOs**
-Two LFOs share the assignable destination list. Settings (dest, amount, rate, wave, retrig) are per engine instance. Each voice runs its own pair. Levels are bipolar (-1..1). Retrig defaults on and resets that voice's LFO phase on note-on. Rate is 0.05..20 Hz (default 1). Waves: sine, triangle, square, saw (rising), and sample-and-hold. Two sources on the same dest add, then that dest is applied once.
+Two LFOs per engine. Settings and phase are per engine, so every voice of that engine reads the same level. The phase advances while the engine is on, including through silence, and pauses while the engine is off. Retrig defaults off: a new note joins the current level, and held notes do not jump. Retrig on restarts that shared phase on any note-on, so every sounding note snaps together. Sample-and-hold uses one shared level. `random` always leaves retrig off. Rate is 0.05..20 Hz (default 1). Waves: sine, triangle, square, saw (rising), and sample-and-hold. Two sources on the same dest add, then that dest is applied once.
 
 **Terminal param control for laptop development**
-Laptop hosts (via `host-common`) change engine params with compact grouped line commands. Commands target a current engine (`eng 1` through `eng 4`, 1-based, space required). Unqualified commands hit current. `eng 2 cutoff 800` is one-shot and does not change current. Routing commands: `on`, `off`, `ch <1..16>`, `vol <0..1>`. Oscillator levels: `saw`, `sq`, `tri`, `sin`, and `sub` (each `<0..1>`). `wave saw|square|triangle|sine` is a solo preset (one at-pitch level 1.0, others 0, `sub` 0). `pw <0.05..0.95>` sets square pulse width. `suboct 1|2` sets the sub octave. ADSR commands use `amp a|d|s|r`, `fenv a|d|s|r`, and `asenv a|d|s|r`; the latter two also support `amt`, and `asenv dest` accepts `off|res|pitch|cutoff|pw|amp`. LFO commands (space required, like `eng 2`): `lfo 1` and `lfo 2` with fields `dest`, `amt`, `rate`, `wave`, `retrig`. Defaults: dest off, amt 0, rate 1 Hz, wave sine, retrig on. Rate is 0.05..20 Hz. Waves: `sine`, `tri`, `square`, `saw`, `sh` (aliases `triangle`, `sq`, `snh`). `lfo1` is invalid. Shared operations use `env copy`, `env link`, and `env vel`. `show` prints a replayable qualified patch from a host-side copy. `random` fills subtractive params including random levels for all five oscillators, both LFOs, plus volume (0.2–1.0) and does not change on/off or listen channel. The random recipe lives in the `engine` crate so the laptop command and the Daisy button share one fill. Printed patches use canonical `eng N ...` lines. Earlier flat command names remain parser aliases but are not printed or documented as canonical commands. Same commands on `host-wsl` and `host-windows`. Real MIDI CC from the Polyend or other devices are a later session. High-rate knobs/CC may later use atomics plus smoothing; discrete commands and note events use the SPSC queue now.
+Laptop hosts (via `host-common`) change engine params with compact grouped line commands. Commands target a current engine (`eng 1` through `eng 4`, 1-based, space required). Unqualified commands hit current. `eng 2 cutoff 800` is one-shot and does not change current. Routing commands: `on`, `off`, `ch <1..16>`, `vol <0..1>`. Oscillator levels: `saw`, `sq`, `tri`, `sin`, and `sub` (each `<0..1>`). `wave saw|square|triangle|sine` is a solo preset (one at-pitch level 1.0, others 0, `sub` 0). `pw <0.05..0.95>` sets square pulse width. `suboct 1|2` sets the sub octave. ADSR commands use `amp a|d|s|r`, `fenv a|d|s|r`, and `asenv a|d|s|r`; the latter two also support `amt`, and `asenv dest` accepts `off|res|pitch|cutoff|pw|amp`. LFO commands (space required, like `eng 2`): `lfo 1` and `lfo 2` with fields `dest`, `amt`, `rate`, `wave`, `retrig`. Defaults: dest off, amt 0, rate 1 Hz, wave sine, retrig off. Rate is 0.05..20 Hz. Waves: `sine`, `tri`, `square`, `saw`, `sh` (aliases `triangle`, `sq`, `snh`). `lfo1` is invalid. Shared operations use `env copy`, `env link`, and `env vel`. `show` prints a replayable qualified patch from a host-side copy. `random` fills subtractive params including random levels for all five oscillators, both LFOs, plus volume (0.2–1.0), always leaves retrig off, and does not change on/off or listen channel. The random recipe lives in the `engine` crate so the laptop command and the Daisy button share one fill. Printed patches use canonical `eng N ...` lines. Earlier flat command names remain parser aliases but are not printed or documented as canonical commands. Same commands on `host-wsl` and `host-windows`. Real MIDI CC from the Polyend or other devices are a later session. High-rate knobs/CC may later use atomics plus smoothing; discrete commands and note events use the SPSC queue now.
 
 **Multitimbral routing with per-engine volume**
 Four engine instances live in a mixer in the `engine` crate. Instance 1 starts enabled on listen channel 1. Instances 2–4 start disabled, with listen channels 2, 3, and 4 pre-set. MIDI notes fan out to every enabled instance whose listen channel matches. Disabled instances are skipped in the audio loop and ignore notes. `off` silences that instance immediately. Volume is per instance via terminal `vol` (default 1.0). MIDI CC volume waits with the rest of CC mapping. Physical knobs later.
 
 **Per-engine fixed polyphony**
-Each engine has a fixed set of 4 voices (tunable after measuring the Daisy). Note-off starts amp release; a voice frees when the amp envelope finishes. When stealing, prefer voices already in release (oldest among those), else the oldest voice overall. Note number → Hz lives in the engine. Voices use a fixed low per-voice gain, velocity curve, and are summed (no divide-by-voice-count). A shared voice pool may come later if channels starve each other.
+Each engine has a fixed set of 4 voices. Measured on `audio-probe` with the instruction cache on, the data cache off, and the sine table in DTCM: the heavy patch at volume 0.7 stays under 50% of the 32-sample callback for one through four held notes (one blink on clicks 1 through 6, 2026-09-25). Note-off starts amp release; a voice frees when the amp envelope finishes. When stealing, prefer voices already in release (oldest among those), else the oldest voice overall. Note number → Hz lives in the engine. Voices use a fixed low per-voice gain, velocity curve, and are summed (no divide-by-voice-count). A shared voice pool may come later if channels starve each other.
+
+**Daisy audio-probe stress test**
+`audio-probe` stays the Daisy stress test for engine load on the Seed. The heavy-patch engines it loads keep sounding through click 8: one engine with up to four notes, two engines with one note each, and four engines with one note each. Click 9 loads two engines with all four heavy notes each, and the audio callback stops. Those results are the baseline from before this experiment. Flash 1 (2026-09-26), data cache still off: click 9 was two blinks. Click 10 started, then the audio callback stopped and the LED blinked continuously. Flash 2 (2026-09-26), data cache on: click 10 was two blinks and audio kept coming out. Click 11 started blinking.
+
+**Seed load experiment**
+This branch measures two `audio-probe` flashes. Flash 1 wraps oscillator phase with a compare and subtract, shares one phase across the four at-pitch waves (sub keeps its own, level 0 still skips that wave), and advances the filter and assignable envelopes one closed-form step per 32-sample block. The amp envelope stays per sample. The mixer already lives in DTCM, so it is not moved. Flash 2 keeps the instruction cache on, turns the data cache on, and leaves the codec DMA buffers in RAM_D2 uncached. Sixteen heavy voices are a measurement, not a pass mark. Flash 2 touches `audio-probe` only until that listen is clean.
 
 **Per-engine output calibration**
 Each engine applies a fixed 1.75 output multiplier after summing its voices. `vol` remains per-engine from 0 through 1; `vol 1` is that synth's calibrated full output. The uniform calibration preserves oscillator mix, sub level, envelopes, filter response, velocity, and modulation. The mixer does not automatically normalize combined engines.
@@ -162,13 +179,13 @@ The engine produces mono audio at 48 kHz (matching the Daisy codec). The mixer i
 The permanent `double-blink` diagnostic is the first Seed 3 firmware test. Build and convert it with explicit commands, then flash it directly to internal memory through the STM32 ROM DFU bootloader. Add PowerShell and WSL flash scripts only after this manual workflow is proven. A debug probe (ST-Link or similar) remains planned for defmt logs and step debugging.
 
 **Daisy hardware bring-up sequence**
-`double-blink` proved ARM compile, boot, and DFU. `breadboard-led` is the first Seed 3 path through the codec and the shared mixer/engine (48 kHz mono, engine 1 at volume 0.4 until `random`). Remaining bring-up is serial MIDI into that same mixer. Delete this entry once MIDI is in and nearby code or tests represent it.
+`double-blink` proved ARM compile, boot, and DFU. `breadboard-led` is the first Seed 3 path through the codec and the shared mixer/engine (48 kHz mono, engine 1 at volume 1.0 on first press and after `random`). Remaining bring-up is serial MIDI into that same mixer. Delete this entry once MIDI is in and nearby code or tests represent it.
 
 **Breadboard OLED and button demo**
-`breadboard-led` drives a 0.96" SSD1306 (I2C D11/D12): `Hello` for 3 s, then sleep. First D15 press plays C4-E4-G4 (1 s gate, 2 s rest); later presses `random` then replay. Extra presses during a sequence are ignored. OLED is a rolling scope while notes sound, then a condensed patch card. LED on D24 follows the gate. Audio is line-level on Audio Out 1 and AGND.
+`breadboard-led` drives a 0.96" SSD1306 (I2C D11/D12). Hello for 3 s, then sleep, both before audio starts. After that the Seed does not talk to the screen. First D15 press plays C4-E4-G4 (1 s gate, 2 s rest); later presses `random` then replay. Extra presses during a sequence are ignored. LED on D24 follows the gate. Audio is line-level on Audio Out 1 and 2 (pins 18 and 19) and AGND (pin 20), the same mono mix on both codec channels, into a TRRS headphone jack. Quiet is expected.
 
-**Breadboard rolling scope (current)**
-OLED I2C at 400 kHz. Scope reads a 128-sample atomic ring filled from the audio loop; UI redraws on a ~33 ms timer with `clear_buffer` each frame so old pixels do not ghost. Waveform is clamped to a middle band (rows 12–52), so loud peaks flatten at the band edge. SPI4 is masked during every blocking OLED flush so I2C is not interrupted; scope stays choppy (~1–2 FPS while notes move, ~20 FPS on silence) because full-frame flushes compete with audio. Acceptable for bring-up; smoother scope is a later session. Min/max column thickness and unmasked scope flushes were tried and rejected or deferred.
+**Breadboard OLED (current)**
+Hello then sleep before the codec starts. No live scope and no patch card on the Seed. Audio uses the daisy-embassy Seed 3 callback (TX and RX paced to the codec) on the thread executor. A later patch card or menus must not pause audio. Hardware is deferred (another microcontroller, or Daisy with a non-blocking display path).
 
 **Lock-free control signals into the audio callback**
 The audio callback must never block or wait, since a stall causes audible clicks. Never use a `Mutex` on that path. Note on/off and discrete param changes use a host-owned lock-free SPSC queue (`rtrb` on the laptop, `heapless` spsc on the Daisy). Only the audio thread calls into the engine. Display drawing stays off that path. On the laptop hosts, a `Mutex` may guard the queue *producer* when both MIDI and the terminal push events; that lock is never taken inside the audio callback. Atomics plus smoothing are reserved for a later high-rate knob/CC path.
@@ -178,3 +195,6 @@ If there is exactly one output device or one MIDI input port, the host uses it a
 
 **Personal WSL play launcher**
 A gitignored `play` file at the repo root. From WSL, `./play` opens a new Windows PowerShell 5.1 window and returns immediately. That window uses the documented Windows play recipe (`CARGO_TARGET_DIR` on the Windows drive, `CARGO_INCREMENTAL=0`, `cargo run -p host-windows`) and stays open after the host exits. The Windows `cd` path is hard-coded to `\\wsl$\Ubuntu\home\capinha\audio_experiments\stone-raft`. Not a committed project tool.
+
+**Front panel direction (planning, not firmware)**
+One control strip. Engine 1–4 selects which instance the pots edit; other engines can stay enabled. Layout from the cardboard mockup: VOICE (pick, LEVEL, ON) with LFO under it; OSC (saw, square, triangle, sine, then sub and pulse width); FILTER (cutoff, res, EG AMT) to the right of osc; ENVELOPE under osc+filter, starting under sine, as its own section. Hold-to-random, ENV LINK, optional status OLED on the right. No second lane. No shared MASTER pot. Pickup after `random` or engine switch is optional later. Status need is dest / on / listen channel, not a Minilogue-class scope. Mockup: `canvases/synth-front-panel.canvas.tsx` in the Cursor project folder.

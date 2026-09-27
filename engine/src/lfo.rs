@@ -1,6 +1,7 @@
-//! Per-voice assignable LFO: phase, five waves, and sample-and-hold.
+//! One assignable LFO phase per engine: five waves, and sample-and-hold.
 
 use crate::AssignableDest;
+use crate::sine::sine_from_phase;
 
 /// LFO rate in Hz. Below this the motion is too slow to hear as a cycle.
 pub const LFO_RATE_MIN_HZ: f32 = 0.05;
@@ -52,12 +53,12 @@ impl Default for LfoParams {
             amount: 0.0,
             rate_hz: LFO_RATE_DEFAULT_HZ,
             wave: LfoWave::Sine,
-            retrigger: true,
+            retrigger: false,
         }
     }
 }
 
-/// Per-voice LFO runner. Reads dest, amount, rate, and wave from [`LfoParams`] each sample.
+/// One LFO runner shared by every voice of an engine.
 pub(crate) struct Lfo {
     sample_rate_hz: f32,
     phase: f32,
@@ -66,12 +67,12 @@ pub(crate) struct Lfo {
 }
 
 impl Lfo {
-    pub(crate) fn new(sample_rate_hz: f32, voice_index: usize, lfo_index: usize) -> Self {
+    pub(crate) fn new(sample_rate_hz: f32, lfo_index: usize) -> Self {
         Self {
             sample_rate_hz,
             phase: 0.0,
             held: 0.0,
-            rng: mix_seed(voice_index, lfo_index),
+            rng: mix_seed(lfo_index),
         }
     }
 
@@ -81,11 +82,19 @@ impl Lfo {
         self.held = self.next_bipolar();
     }
 
-    /// Advances one sample and returns a level in -1..1.
-    pub(crate) fn next_level(&mut self, rate_hz: f32, wave: LfoWave) -> f32 {
-        let increment = rate_hz / self.sample_rate_hz;
-        let level = match wave {
-            LfoWave::Sine => libm::sinf(core::f32::consts::TAU * self.phase),
+    /// Returns the current level, then moves `samples` ahead.
+    ///
+    /// The level stays constant for those samples. Sample-and-hold still draws a
+    /// new value each time the phase wraps.
+    pub(crate) fn advance(&mut self, rate_hz: f32, wave: LfoWave, samples: u32) -> f32 {
+        let level = self.level_at_phase(wave);
+        self.advance_phase(rate_hz, wave, samples);
+        level
+    }
+
+    fn level_at_phase(&self, wave: LfoWave) -> f32 {
+        match wave {
+            LfoWave::Sine => sine_from_phase(self.phase),
             LfoWave::Triangle => triangle_level(self.phase),
             LfoWave::Square => {
                 if self.phase < 0.5 {
@@ -96,8 +105,17 @@ impl Lfo {
             }
             LfoWave::Saw => 2.0 * self.phase - 1.0,
             LfoWave::SampleHold => self.held,
-        };
+        }
+    }
 
+    fn advance_phase(&mut self, rate_hz: f32, wave: LfoWave, samples: u32) {
+        let mut increment = rate_hz / self.sample_rate_hz * samples as f32;
+        while increment >= 1.0 {
+            increment -= 1.0;
+            if matches!(wave, LfoWave::SampleHold) {
+                self.held = self.next_bipolar();
+            }
+        }
         self.phase += increment;
         if self.phase >= 1.0 {
             self.phase -= 1.0;
@@ -105,7 +123,6 @@ impl Lfo {
                 self.held = self.next_bipolar();
             }
         }
-        level
     }
 
     fn next_bipolar(&mut self) -> f32 {
@@ -129,10 +146,9 @@ fn triangle_level(phase: f32) -> f32 {
     }
 }
 
-fn mix_seed(voice_index: usize, lfo_index: usize) -> u32 {
-    let voice = (voice_index as u32).wrapping_add(1);
+fn mix_seed(lfo_index: usize) -> u32 {
     let lfo = (lfo_index as u32).wrapping_add(1);
-    let mut z = voice.wrapping_mul(0x9E37_79B9) ^ lfo.wrapping_mul(0x85EB_CA6B);
+    let mut z = lfo.wrapping_mul(0x85EB_CA6B);
     z = (z ^ (z >> 16)).wrapping_mul(0x7FEB_352D);
     z = (z ^ (z >> 15)).wrapping_mul(0x846C_A68B);
     let mixed = z ^ (z >> 16);
@@ -146,7 +162,7 @@ mod tests {
     const SAMPLE_RATE_HZ: f32 = 48_000.0;
 
     fn lfo() -> Lfo {
-        Lfo::new(SAMPLE_RATE_HZ, 0, 0)
+        Lfo::new(SAMPLE_RATE_HZ, 0)
     }
 
     #[test]
@@ -156,7 +172,7 @@ mod tests {
         let mut min = f32::MAX;
         let mut max = f32::MIN;
         for _ in 0..SAMPLE_RATE_HZ as usize {
-            let level = lfo.next_level(1.0, LfoWave::Sine);
+            let level = lfo.advance(1.0, LfoWave::Sine, 1);
             assert!((-1.0..=1.0).contains(&level), "sine left -1..1: {level}");
             min = min.min(level);
             max = max.max(level);
@@ -169,15 +185,15 @@ mod tests {
     fn square_starts_positive_after_retrigger() {
         let mut lfo = lfo();
         lfo.retrigger();
-        assert_eq!(lfo.next_level(1.0, LfoWave::Square), 1.0);
+        assert_eq!(lfo.advance(1.0, LfoWave::Square, 1), 1.0);
     }
 
     #[test]
     fn saw_rises_after_retrigger() {
         let mut lfo = lfo();
         lfo.retrigger();
-        let first = lfo.next_level(1.0, LfoWave::Saw);
-        let second = lfo.next_level(1.0, LfoWave::Saw);
+        let first = lfo.advance(1.0, LfoWave::Saw, 1);
+        let second = lfo.advance(1.0, LfoWave::Saw, 1);
         assert!(
             first < 0.0,
             "rising saw should start below 0 after retrigger, got {first}"
@@ -194,17 +210,17 @@ mod tests {
         lfo.retrigger();
         // 480 Hz at 48 kHz: one cycle every 100 samples.
         let rate_hz = 480.0;
-        let held = lfo.next_level(rate_hz, LfoWave::SampleHold);
+        let held = lfo.advance(rate_hz, LfoWave::SampleHold, 1);
         for _ in 0..90 {
             assert_eq!(
-                lfo.next_level(rate_hz, LfoWave::SampleHold),
+                lfo.advance(rate_hz, LfoWave::SampleHold, 1),
                 held,
                 "sample-and-hold should keep the same value before wrap"
             );
         }
         let mut jumped = held;
         for _ in 0..20 {
-            jumped = lfo.next_level(rate_hz, LfoWave::SampleHold);
+            jumped = lfo.advance(rate_hz, LfoWave::SampleHold, 1);
         }
         assert_ne!(
             jumped, held,

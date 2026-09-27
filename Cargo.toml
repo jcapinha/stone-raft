@@ -1,3 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["engine", "host-common", "host-wsl", "host-windows", "host-daisy"]
+
+# Daisy audio runs from flash. Thin LTO lets the codec callback inline the
+# engine, so a heavy voice does not pay a separate call for every oscillator sample.
+[profile.release]
+lto = "thin"
+codegen-units = 1

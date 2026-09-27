@@ -1,4 +1,9 @@
 //! Fixed voice ownership, allocation, and subtractive sample rendering.
+//!
+//! Pitch, cutoff, resonance, pulse width, filter and assignable envelopes, and
+//! LFO levels are refreshed once per 32-sample block. That matches the Daisy
+//! callback. Waveform generation and the amplitude envelope still run at 48 kHz.
+//! Saw, square, triangle, and sine share one phase. The sub sine keeps its own.
 
 use crate::envelope::velocity_to_amp;
 use crate::filter::Svf;
@@ -30,52 +35,50 @@ fn add_assignable(offsets: &mut ModOffsets, dest: AssignableDest, level: f32, am
 
 /// Conservative per-voice gain so a few bright voices stay near full scale.
 const VOICE_AMPLITUDE: f32 = 0.12;
+/// Slow controls stay fixed for one Daisy callback, then move again.
+const CONTROL_BLOCK_SAMPLES: usize = 32;
 
-#[derive(Clone, Copy)]
-struct AtPitchLevels {
-    saw: f32,
-    square: f32,
-    triangle: f32,
-    sine: f32,
+#[derive(Default)]
+struct HeldControl {
+    saw_gain: f32,
+    square_gain: f32,
+    triangle_gain: f32,
+    sine_gain: f32,
+    sub_gain: f32,
+    output_gain: f32,
 }
 
 struct Voice {
-    saw: Oscillator,
-    square: Oscillator,
-    triangle: Oscillator,
-    sine: Oscillator,
+    at_pitch: Oscillator,
     sub: Oscillator,
     filter: Svf,
     amp: crate::Adsr,
     filter_env: crate::Adsr,
     assignable_env: crate::Adsr,
-    lfos: [Lfo; 2],
     note: u8,
     velocity_amp: f32,
     base_hz: f32,
     /// Monotonic age stamp; higher means more recently started (used for steal).
     age: u32,
+    samples_until_control: u8,
+    control: HeldControl,
 }
 
 impl Voice {
-    fn new(sample_rate_hz: f32, voice_index: usize) -> Self {
+    fn new(sample_rate_hz: f32) -> Self {
         Self {
-            saw: Oscillator::new(sample_rate_hz, 440.0, Waveform::Saw),
-            square: Oscillator::new(sample_rate_hz, 440.0, Waveform::Square),
-            triangle: Oscillator::new(sample_rate_hz, 440.0, Waveform::Triangle),
-            sine: Oscillator::new(sample_rate_hz, 440.0, Waveform::Sine),
+            at_pitch: Oscillator::new_at_pitch(sample_rate_hz, 440.0),
             sub: Oscillator::new(sample_rate_hz, 220.0, Waveform::Sine),
             filter: Svf::new(),
             amp: crate::Adsr::new(sample_rate_hz),
             filter_env: crate::Adsr::new(sample_rate_hz),
             assignable_env: crate::Adsr::new(sample_rate_hz),
-            lfos: core::array::from_fn(|lfo_index| {
-                Lfo::new(sample_rate_hz, voice_index, lfo_index)
-            }),
             note: 0,
             velocity_amp: 1.0,
             base_hz: 440.0,
             age: 0,
+            samples_until_control: 0,
+            control: HeldControl::default(),
         }
     }
 
@@ -102,11 +105,8 @@ impl Voice {
         params: &EngineParams,
     ) {
         let base_hz = midi_note_to_hz(note);
-        self.saw = Oscillator::new(sample_rate_hz, base_hz, Waveform::Saw);
-        self.square = Oscillator::new(sample_rate_hz, base_hz, Waveform::Square);
-        self.square.set_pulse_width(params.pulse_width);
-        self.triangle = Oscillator::new(sample_rate_hz, base_hz, Waveform::Triangle);
-        self.sine = Oscillator::new(sample_rate_hz, base_hz, Waveform::Sine);
+        self.at_pitch = Oscillator::new_at_pitch(sample_rate_hz, base_hz);
+        self.at_pitch.set_pulse_width(params.pulse_width);
         let sub_hz =
             (base_hz / params.sub_octaves.frequency_divisor()).clamp(20.0, sample_rate_hz * 0.25);
         self.sub = Oscillator::new(sample_rate_hz, sub_hz, Waveform::Sine);
@@ -115,15 +115,11 @@ impl Voice {
         self.amp.note_on();
         self.filter_env.note_on();
         self.assignable_env.note_on();
-        for (index, lfo) in self.lfos.iter_mut().enumerate() {
-            if params.lfos[index].retrigger {
-                lfo.retrigger();
-            }
-        }
         self.note = note;
         self.velocity_amp = velocity_to_amp(velocity);
         self.base_hz = base_hz;
         self.age = age;
+        self.samples_until_control = 0;
     }
 
     fn release(&mut self) {
@@ -138,13 +134,51 @@ impl Voice {
         self.assignable_env.force_idle();
     }
 
-    fn render_sample(&mut self, sample_rate_hz: f32, params: &EngineParams) -> f32 {
+    #[inline]
+    fn render_sample(
+        &mut self,
+        sample_rate_hz: f32,
+        params: &EngineParams,
+        lfo_levels: &[f32; 2],
+    ) -> f32 {
         if !self.is_active() {
             return 0.0;
         }
+        if self.samples_until_control == 0 {
+            self.update_control(sample_rate_hz, params, lfo_levels);
+            self.samples_until_control = CONTROL_BLOCK_SAMPLES as u8;
+        }
+        self.samples_until_control -= 1;
 
-        let filter_level = self.filter_env.next_level();
-        let assign_level = self.assignable_env.next_level();
+        let mut mix = 0.0;
+        if self.control.saw_gain > 0.0 {
+            mix += self.control.saw_gain * self.at_pitch.sample_saw();
+        }
+        if self.control.square_gain > 0.0 {
+            mix += self.control.square_gain * self.at_pitch.sample_square();
+        }
+        if self.control.triangle_gain > 0.0 {
+            mix += self.control.triangle_gain * self.at_pitch.sample_triangle();
+        }
+        if self.control.sine_gain > 0.0 {
+            mix += self.control.sine_gain * self.at_pitch.sample_sine();
+        }
+        self.at_pitch.advance_phase();
+        if self.control.sub_gain > 0.0 {
+            mix += self.control.sub_gain * self.sub.next_sine();
+        }
+        let filtered = self.filter.tick(mix);
+        let amp = self.amp.next_level();
+        filtered * amp * self.control.output_gain
+    }
+
+    fn update_control(
+        &mut self,
+        sample_rate_hz: f32,
+        params: &EngineParams,
+        lfo_levels: &[f32; 2],
+    ) {
+        let (filter_level, assign_level) = self.advance_control_envelopes();
         let velocity = self.velocity_amp;
         let filter_octaves = filter_level
             * effective_envelope_amount(params.filter_env_amount, params.env_vel, velocity);
@@ -158,85 +192,56 @@ impl Voice {
             assign_level,
             assign_amount,
         );
-        for (index, lfo) in self.lfos.iter_mut().enumerate() {
+        for (index, level) in lfo_levels.iter().copied().enumerate() {
             let lfo_params = &params.lfos[index];
-            let level = lfo.next_level(lfo_params.rate_hz, lfo_params.wave);
-            if lfo_params.dest != AssignableDest::Off && lfo_params.amount != 0.0 {
-                add_assignable(&mut offsets, lfo_params.dest, level, lfo_params.amount);
+            if lfo_params.dest == AssignableDest::Off || lfo_params.amount == 0.0 {
+                continue;
             }
+            add_assignable(&mut offsets, lfo_params.dest, level, lfo_params.amount);
         }
         offsets.cutoff_octaves += filter_octaves;
 
         let oscillator_hz = hz_times_octaves(self.base_hz, offsets.pitch_octaves)
             .clamp(20.0, sample_rate_hz * 0.25);
-        let cutoff_hz = hz_times_octaves(params.cutoff_hz, offsets.cutoff_octaves);
-        let resonance = params.resonance + offsets.resonance;
         let pulse_width =
             (params.pulse_width + offsets.pulse_width).clamp(PULSE_WIDTH_MIN, PULSE_WIDTH_MAX);
-        let levels = AtPitchLevels {
-            saw: params.saw_vol,
-            square: params.square_vol,
-            triangle: params.triangle_vol,
-            sine: params.sine_vol,
-        };
+        self.at_pitch.set_frequency(sample_rate_hz, oscillator_hz);
+        self.at_pitch.set_pulse_width(pulse_width);
+        let sub_hz = (oscillator_hz / params.sub_octaves.frequency_divisor())
+            .clamp(20.0, sample_rate_hz * 0.25);
+        self.sub.set_frequency(sample_rate_hz, sub_hz);
+        let cutoff_hz = hz_times_octaves(params.cutoff_hz, offsets.cutoff_octaves);
+        let resonance = params.resonance + offsets.resonance;
+        self.filter
+            .update_coefficients(sample_rate_hz, cutoff_hz, resonance);
 
-        if levels.saw > 0.0 {
-            self.saw.set_frequency(sample_rate_hz, oscillator_hz);
-        }
-        if levels.square > 0.0 {
-            self.square.set_frequency(sample_rate_hz, oscillator_hz);
-            self.square.set_pulse_width(pulse_width);
-        }
-        if levels.triangle > 0.0 {
-            self.triangle.set_frequency(sample_rate_hz, oscillator_hz);
-        }
-        if levels.sine > 0.0 {
-            self.sine.set_frequency(sample_rate_hz, oscillator_hz);
-        }
+        let sum = params.saw_vol + params.square_vol + params.triangle_vol + params.sine_vol;
+        let scale = if sum == 0.0 { 0.0 } else { 1.0 / sum };
+        self.control.saw_gain = params.saw_vol * scale;
+        self.control.square_gain = params.square_vol * scale;
+        self.control.triangle_gain = params.triangle_vol * scale;
+        self.control.sine_gain = params.sine_vol * scale;
+        self.control.sub_gain = params.sub_vol;
+        self.control.output_gain =
+            self.velocity_amp * VOICE_AMPLITUDE * (1.0 + offsets.amp).max(0.0);
+    }
 
-        let samples = [
-            if levels.saw > 0.0 {
-                self.saw.next_sample()
-            } else {
-                0.0
-            },
-            if levels.square > 0.0 {
-                self.square.next_sample()
-            } else {
-                0.0
-            },
-            if levels.triangle > 0.0 {
-                self.triangle.next_sample()
-            } else {
-                0.0
-            },
-            if levels.sine > 0.0 {
-                self.sine.next_sample()
-            } else {
-                0.0
-            },
-        ];
-        let main = normalize_blend(levels, samples);
-        let oscillator = if params.sub_vol > 0.0 {
-            let sub_hz = (oscillator_hz / params.sub_octaves.frequency_divisor())
-                .clamp(20.0, sample_rate_hz * 0.25);
-            self.sub.set_frequency(sample_rate_hz, sub_hz);
-            main + params.sub_vol * self.sub.next_sample()
-        } else {
-            main
-        };
-        let filtered = self
-            .filter
-            .process(oscillator, sample_rate_hz, cutoff_hz, resonance);
-        let amp = self.amp.next_level();
-        let amp_gain = (1.0 + offsets.amp).max(0.0);
-        filtered * amp * self.velocity_amp * VOICE_AMPLITUDE * amp_gain
+    /// Level for this block is one step ahead. Stored level is where 32 steps land.
+    fn advance_control_envelopes(&mut self) -> (f32, f32) {
+        let samples = CONTROL_BLOCK_SAMPLES as u32;
+        let filter_level = self.filter_env.advance_block(samples);
+        let assign_level = self.assignable_env.advance_block(samples);
+        (filter_level, assign_level)
     }
 }
 
 pub(crate) struct Voices {
     sample_rate_hz: f32,
     voices: [Voice; VOICE_COUNT],
+    lfos: [Lfo; 2],
+    /// Level held for the current 32-sample block. Every voice reads this.
+    lfo_levels: [f32; 2],
+    samples_until_lfo: u8,
     next_age: u32,
 }
 
@@ -244,7 +249,10 @@ impl Voices {
     pub(crate) fn new(sample_rate_hz: f32, params: &EngineParams) -> Self {
         let mut voices = Self {
             sample_rate_hz,
-            voices: core::array::from_fn(|index| Voice::new(sample_rate_hz, index)),
+            voices: core::array::from_fn(|_| Voice::new(sample_rate_hz)),
+            lfos: core::array::from_fn(|index| Lfo::new(sample_rate_hz, index)),
+            lfo_levels: [0.0; 2],
+            samples_until_lfo: 0,
             next_age: 1,
         };
         voices.synchronize_envelopes(params);
@@ -265,6 +273,11 @@ impl Voices {
             .position(|voice| voice.is_active() && voice.note == note)
             .or_else(|| self.voices.iter().position(|voice| !voice.is_active()))
             .unwrap_or_else(|| self.steal_index());
+        for (lfo_index, lfo) in self.lfos.iter_mut().enumerate() {
+            if params.lfos[lfo_index].retrigger {
+                lfo.retrigger();
+            }
+        }
         self.voices[index].start(self.sample_rate_hz, note, velocity, age, params);
     }
 
@@ -290,15 +303,35 @@ impl Voices {
 
     pub(crate) fn synchronize_pulse_width(&mut self, width: f32) {
         for voice in &mut self.voices {
-            voice.square.set_pulse_width(width);
+            voice.at_pitch.set_pulse_width(width);
         }
     }
 
+    #[inline]
     pub(crate) fn render_sample(&mut self, params: &EngineParams) -> f32 {
+        self.tick_lfos(params);
+        let levels = self.lfo_levels;
+        let sample_rate_hz = self.sample_rate_hz;
         self.voices
             .iter_mut()
-            .map(|voice| voice.render_sample(self.sample_rate_hz, params))
+            .map(|voice| voice.render_sample(sample_rate_hz, params, &levels))
             .sum()
+    }
+
+    /// Both LFOs step once per 32-sample block, including while no note is held.
+    fn tick_lfos(&mut self, params: &EngineParams) {
+        if self.samples_until_lfo == 0 {
+            for (index, lfo) in self.lfos.iter_mut().enumerate() {
+                let lfo_params = &params.lfos[index];
+                self.lfo_levels[index] = lfo.advance(
+                    lfo_params.rate_hz,
+                    lfo_params.wave,
+                    CONTROL_BLOCK_SAMPLES as u32,
+                );
+            }
+            self.samples_until_lfo = CONTROL_BLOCK_SAMPLES as u8;
+        }
+        self.samples_until_lfo -= 1;
     }
 
     fn steal_index(&self) -> usize {
@@ -320,18 +353,6 @@ impl Voices {
 
 fn effective_envelope_amount(amount: f32, env_vel: f32, velocity: f32) -> f32 {
     amount * (1.0 - env_vel + env_vel * velocity)
-}
-
-fn normalize_blend(levels: AtPitchLevels, samples: [f32; 4]) -> f32 {
-    let sum = levels.saw + levels.square + levels.triangle + levels.sine;
-    if sum == 0.0 {
-        return 0.0;
-    }
-    (levels.saw * samples[0]
-        + levels.square * samples[1]
-        + levels.triangle * samples[2]
-        + levels.sine * samples[3])
-        / sum
 }
 
 #[cfg(test)]
@@ -369,5 +390,50 @@ mod tests {
         let notes = core::array::from_fn(|index| voices.voices[index].note);
         assert_eq!(notes, [60, 62, 64, 65]);
         assert!(voices.render_sample(&params).is_finite());
+    }
+
+    fn phase_after(increment: f32, steps: u32) -> f32 {
+        let mut phase = 0.0;
+        for _ in 0..steps {
+            phase += increment;
+            if phase >= 1.0 {
+                phase -= 1.0;
+            }
+        }
+        phase
+    }
+
+    #[test]
+    fn mixed_saw_and_square_share_one_phase() {
+        let mut params = EngineParams::default();
+        params.square_vol = 1.0;
+        params.sub_vol = 1.0;
+        let mut voices = Voices::new(SAMPLE_RATE_HZ, &params);
+        voices.note_on(69, 127, &params);
+        for _ in 0..100 {
+            voices.render_sample(&params);
+        }
+
+        let at_pitch = &voices.voices[0].at_pitch;
+        let sub = &voices.voices[0].sub;
+        let phase = at_pitch.phase();
+        let increment = at_pitch.phase_increment();
+        let expected = phase_after(increment, 100);
+        let doubled = phase_after(increment, 200);
+        assert!(
+            (phase - expected).abs() < 1e-5,
+            "shared phase {phase} != 100 steps of {increment} ({expected})"
+        );
+        assert!(
+            (phase - doubled).abs() > 1e-3,
+            "shared phase matched 200 steps; saw and square each advanced"
+        );
+        let sub_phase = sub.phase();
+        let sub_expected = phase_after(sub.phase_increment(), 100);
+        assert!(
+            (sub_phase - sub_expected).abs() < 1e-5,
+            "sub phase {sub_phase} != its own 100 steps ({sub_expected})"
+        );
+        assert!((sub.phase_increment() * 2.0 - increment).abs() < 1e-5);
     }
 }

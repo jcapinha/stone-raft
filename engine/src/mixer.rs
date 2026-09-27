@@ -149,6 +149,7 @@ impl Mixer {
     }
 
     /// Mixes enabled instances only. Disabled instances do not run engine DSP.
+    #[inline]
     pub fn next_sample(&mut self) -> f32 {
         let mut mix = 0.0;
         for instance in self.instances.iter_mut() {

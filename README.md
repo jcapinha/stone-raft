@@ -99,9 +99,9 @@ The four at-pitch oscillator levels are normalized as weights. Sub is additive. 
 | `fenv a <ms>`; `fenv d <ms>`; `fenv s <0..1>`; `fenv r <ms>` | Filter ADSR |
 | `asenv dest off|res|pitch|cutoff|pw|amp`; `asenv amt <signed>` | Assignable destination and amount; octaves for pitch/cutoff, linear for resonance, pulse width, and amp; aliases: `resonance`, `pulse`, `pwm` |
 | `asenv a <ms>`; `asenv d <ms>`; `asenv s <0..1>`; `asenv r <ms>` | Assignable ADSR |
-| `lfo 1` / `lfo 2` dest off|res|pitch|cutoff|pw|amp; amt; rate; wave; retrig | Two assignable LFOs; bipolar swing around the knob; rate 0.05..20 Hz; retrig defaults on; waves `sine`, `tri`, `square`, `saw`, `sh` (aliases `triangle`, `sq`, `snh`); `lfo1` is invalid |
+| `lfo 1` / `lfo 2` dest off|res|pitch|cutoff|pw|amp; amt; rate; wave; retrig | Two assignable LFOs; one shared phase per engine, so every note of that engine reads the same level; bipolar swing around the knob; rate 0.05..20 Hz; retrig defaults off (a new note joins the current level; `retrig on` restarts that shared phase so held notes snap together); waves `sine`, `tri`, `square`, `saw`, `sh` (aliases `triangle`, `sq`, `snh`); `lfo1` is invalid |
 | `env copy`; `env link on|off`; `env vel <0..1>` | Copy amp times, link envelope times, and scale extra envelopes by velocity |
-| `random` | Randomize subtractive parameters, both LFOs, and volume `0.2..1.0`; keep enabled state and channel |
+| `random` | Randomize subtractive parameters, both LFOs, and volume `0.2..1.0`; always leaves LFO retrig off; keep enabled state and channel |
 
 
 `show` and `random` print qualified `eng N` lines and do not change enabled state or listen channel.
@@ -185,13 +185,44 @@ The device normally reports USB ID `0483:df11`. If Windows can see it but `dfu-u
 
 Confirm the double blink after flashing the firmware. If necessary, press RESET, and disconnect and reconnect USB power.
 
+## Daisy audio probe
+
+`audio-probe` separates codec/SAI transport problems from synth engine load. It uses the D15 button, D24 LED, and the normal audio outputs. It does not initialize the OLED. The instruction cache is on and the data cache is on. The codec DMA buffers in RAM_D2 are marked non-cacheable. The shared sine table is copied into fast RAM at startup. The heavy patch and LFO retrig on are unchanged. On 2026-09-25, clicks 1 through 6 (one engine, volume 0.7, up to four heavy notes) were one blink. On 2026-09-26, click 7 (two engines, one note each) was one blink, and click 8 (four engines, one note each) was two blinks. Click 9 (two engines, four heavy notes each) stopped the audio callback immediately, including after a pause between each patch and its notes. Clicks 10 and 11 have not been measured yet. Those blink counts are the baseline from before this experiment. Flash 1 (2026-09-26), data cache still off: click 9 was two blinks. Click 10 started, then the audio callback stopped and the LED blinked continuously. Flash 2 (2026-09-26), data cache on: click 10 was two blinks and audio kept coming out. Click 11 started blinking.
+
+After the long boot flash, button presses select raw triangle, default saw, then the deterministic heavy patch with one, two, three, and four held voices on engine 1 (volume 0.7). Click 7 is that patch on two engines, one note each, at volume 0.35. Click 8 is four engines, one note each, at volume 0.25. Clicks 9, 10, and 11 hold all four voices on two, three, and four engines. Those three use volume 0.7 divided by the engine count, so the mix stays near click 6. Every engine plays the same C3, E3, G3, and B3 chord. Each extra engine is loaded on its own, with a short pause so the control queue can drain. Engines keep listen channels 1 through 4, so each chord stays on one engine. The sequence repeats after click 11. About two seconds after each press, the LED reports the peak callback load:
+
+- One blink: under 50% of the 32-frame callback budget.
+- Two blinks: 50-75%.
+- Three blinks: 75% or more.
+- Continuous rapid blink: audio stopped after an interface error; reset the board.
+
+PowerShell, from the WSL-backed repository:
+
+```powershell
+$env:CARGO_TARGET_DIR = "$env:USERPROFILE\stone-raft-target"
+$env:CARGO_INCREMENTAL = "0"
+cargo build -p host-daisy --bin audio-probe --target thumbv7em-none-eabihf --release
+cargo objcopy -p host-daisy --bin audio-probe --target thumbv7em-none-eabihf --release -- -O binary audio-probe.bin
+dfu-util -a 0 -s 0x08000000:leave -D audio-probe.bin
+```
+
+WSL:
+
+```bash
+cargo build -p host-daisy --bin audio-probe --target thumbv7em-none-eabihf --release
+cargo objcopy -p host-daisy --bin audio-probe --target thumbv7em-none-eabihf --release -- -O binary audio-probe.bin
+dfu-util -a 0 -s 0x08000000:leave -D audio-probe.bin
+```
+
+Before either flash command, hold BOOT, press and release RESET, then release BOOT. WSL also needs the DFU device attached with `usbipd`, as described in the one-time setup above. Always use `--release`.
+
 ## Daisy breadboard play
 
-`breadboard-led` runs the synth engine through the Seed 3 codec, plus a 0.96" I2C OLED and the breadboard button/LED. Boot flashes the LED three times. OLED uses blocking I2C at 400 kHz with a 200 ms timeout so a missing screen cannot freeze the button. Hello is drawn before audio starts, stays for 3 seconds, then the screen sleeps. Audio runs on a higher-priority interrupt executor; SPI4 is masked during each blocking OLED flush so I2C is not cut off mid-transfer. First button press plays C4, E4, G4 (1 s gate, 2 s rest). Later presses apply `random`, then replay. While notes sound the OLED is a rolling scope of recent mixer samples (waveform clamped to a middle band; expect choppy refresh while notes move, faster on silence). After the arpeggio it shows a condensed patch card. The LED is on only during each 1 s gate.
+`breadboard-led` runs the synth engine through the Seed 3 codec, plus a 0.96" I2C OLED and the breadboard button/LED. The instruction cache is on and the data cache stays off. Boot flashes the LED three times. OLED uses blocking I2C at 400 kHz with a 200 ms timeout so a missing screen cannot freeze the button. Hello is drawn, stays for 3 seconds, then the screen sleeps, all before audio starts. After that the Seed does not talk to the OLED. Audio uses the daisy-embassy Seed 3 callback. First button press plays C4, E4, G4 (1 s gate, 2 s rest) at volume 1.0. Later presses apply `random`, then replay, still at volume 1.0. The LED follows each 1 s gate. A continuous rapid blink means audio stopped after an interface error and the board needs a reset.
 
-Audio is line-level on Audio Out 1 (pin 18) and AGND (pin 20). Use a powered speaker or mixer, not passive earbuds. OLED power is 3.3 V digital (pin 38) and GND (pin 40). Do not use analog 3.3 V on pin 21.
+Audio is line-level on Audio Out 1 and 2 (pins 18 and 19) and AGND (pin 20). Firmware copies the mono mix to both codec channels. A TRRS breakout plus 10 µF caps and 100 Ω resistors can drive headphones. OLED power is 3.3 V digital (pin 38) and GND (pin 40). Do not use analog 3.3 V on pin 21.
 
-Wiring walkthrough for another agent: `[host-daisy/BREADBOARD_SETUP_PROMPT.md](host-daisy/BREADBOARD_SETUP_PROMPT.md)`.
+Wiring walkthrough for another agent (OLED): [`host-daisy/BREADBOARD_SETUP_PROMPT.md`](host-daisy/BREADBOARD_SETUP_PROMPT.md). Headphones on the TRRS breakout: [`host-daisy/TRRS_BREAKOUT_PROMPT.md`](host-daisy/TRRS_BREAKOUT_PROMPT.md).
 
 One-time ARM/`dfu-util` setup is the same as double blink. When the repository is under `\\wsl$\...`, set `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` as shown in the Windows host section before building. Before flashing from WSL, put the Seed into DFU mode and attach the device shown by `usbipd list`.
 

@@ -7,6 +7,11 @@ use core::f32::consts::PI;
 pub struct Svf {
     ic1eq: f32,
     ic2eq: f32,
+    cached_cutoff: f32,
+    cached_res: f32,
+    a1: f32,
+    a2: f32,
+    a3: f32,
 }
 
 impl Svf {
@@ -14,6 +19,11 @@ impl Svf {
         Self {
             ic1eq: 0.0,
             ic2eq: 0.0,
+            cached_cutoff: f32::NAN,
+            cached_res: f32::NAN,
+            a1: 0.0,
+            a2: 0.0,
+            a3: 0.0,
         }
     }
 
@@ -22,7 +32,8 @@ impl Svf {
         self.ic2eq = 0.0;
     }
 
-    /// Processes one sample. `cutoff_hz` and `resonance` are per-sample values (params plus envelope modulation).
+    /// Processes one sample. Coefficients are rebuilt only when `cutoff_hz` or
+    /// `resonance` changes, so a voice can hold both for a control block.
     pub fn process(
         &mut self,
         input: f32,
@@ -30,23 +41,41 @@ impl Svf {
         cutoff_hz: f32,
         resonance: f32,
     ) -> f32 {
+        self.update_coefficients(sample_rate_hz, cutoff_hz, resonance);
+        self.tick(input)
+    }
+
+    pub(crate) fn update_coefficients(
+        &mut self,
+        sample_rate_hz: f32,
+        cutoff_hz: f32,
+        resonance: f32,
+    ) {
         let nyquist = sample_rate_hz * 0.5;
         let cutoff = cutoff_hz.clamp(20.0, nyquist * 0.99);
         let res = resonance.clamp(0.0, 1.0);
 
-        // Map resonance 0..1 into a useful Q range (0.5 .. ~20).
-        let q = 0.5 * libm::expf(res * 3.7);
-        let g = libm::tanf(PI * cutoff / sample_rate_hz);
-        let k = 1.0 / q;
+        if cutoff != self.cached_cutoff || res != self.cached_res {
+            // Map resonance 0..1 into a useful Q range (0.5 .. ~20).
+            let q = 0.5 * libm::expf(res * 3.7);
+            let g = libm::tanf(PI * cutoff / sample_rate_hz);
+            let k = 1.0 / q;
 
-        // Andy Simper / Cytomic linear trapezoidal SVF (lowpass = v2).
-        let a1 = 1.0 / (1.0 + g * (g + k));
-        let a2 = g * a1;
-        let a3 = g * a2;
+            // Andy Simper / Cytomic linear trapezoidal SVF (lowpass = v2).
+            self.a1 = 1.0 / (1.0 + g * (g + k));
+            self.a2 = g * self.a1;
+            self.a3 = g * self.a2;
+            self.cached_cutoff = cutoff;
+            self.cached_res = res;
+        }
+    }
 
+    /// Filters one sample with the coefficients from the last update.
+    #[inline(always)]
+    pub(crate) fn tick(&mut self, input: f32) -> f32 {
         let v3 = input - self.ic2eq;
-        let v1 = a1 * self.ic1eq + a2 * v3;
-        let v2 = self.ic2eq + a2 * self.ic1eq + a3 * v3;
+        let v1 = self.a1 * self.ic1eq + self.a2 * v3;
+        let v2 = self.ic2eq + self.a2 * self.ic1eq + self.a3 * v3;
         self.ic1eq = 2.0 * v1 - self.ic1eq;
         self.ic2eq = 2.0 * v2 - self.ic2eq;
         v2
@@ -148,6 +177,22 @@ mod tests {
             (impulse_reset - impulse_fresh).abs() < 1e-6,
             "impulse after reset should match a fresh filter"
         );
+    }
+
+    #[test]
+    fn moving_cutoff_and_resonance_stay_finite() {
+        let mut svf = Svf::new();
+        let mut phase = 0.0f32;
+        for step in 0..SAMPLE_RATE_HZ as usize {
+            let cutoff = 100.0 + (step as f32 % 8_000.0);
+            let resonance = (step as f32 / SAMPLE_RATE_HZ) % 1.0;
+            let input = sine_sample(&mut phase, 440.0, SAMPLE_RATE_HZ);
+            let out = svf.process(input, SAMPLE_RATE_HZ, cutoff, resonance);
+            assert!(
+                out.is_finite(),
+                "moving cutoff and resonance must stay finite; got {out}"
+            );
+        }
     }
 
     #[test]

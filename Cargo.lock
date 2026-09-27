@@ -1013,7 +1013,6 @@ dependencies = [
  "embassy-time",
  "embedded-graphics",
  "engine",
- "grounded",
  "heapless",
  "panic-probe",
  "rand",
