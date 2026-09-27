@@ -5,7 +5,10 @@
 //! status, and the normal codec outputs. It never initializes the OLED.
 //!
 //! Each button press advances through:
-//! 1. Raw triangle, with the synth engine bypassed.
+//! 1. Raw 240 Hz sine, with the synth engine bypassed. Temporary whine check.
+//!    This flash also uses a 16-sample batch (3000 Hz) instead of 32 (1500 Hz).
+//!    The usual click 1 is a raw triangle on a 32-sample batch. Restore both
+//!    after this listen. Ignore the LED blinks. They still assume 32 samples.
 //! 2. The default one-saw engine patch with one held note.
 //! 3. A deterministic heavy patch with one held note.
 //! 4. The same heavy patch with two, three, then four held notes, all on engine 1.
@@ -33,6 +36,7 @@ use engine::{
     Mixer, MixerEvent, SubOctaves, patch_events,
 };
 use heapless::spsc::{Consumer, Producer, Queue};
+use libm::sinf;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -57,8 +61,8 @@ const CALLBACK_CYCLES: u32 = 320_000;
 const HALF_BUDGET_CYCLES: u32 = CALLBACK_CYCLES / 2;
 const THREE_QUARTER_BUDGET_CYCLES: u32 = CALLBACK_CYCLES * 3 / 4;
 
-const RAW_TRIANGLE_PERIOD_SAMPLES: u32 = 200;
-const RAW_TRIANGLE_LEVEL: f32 = 0.15;
+const RAW_TONE_PERIOD_SAMPLES: u32 = 200;
+const RAW_TONE_LEVEL: f32 = 0.15;
 const EVENT_QUEUE_CAP: usize = 64;
 const CONFIG_SETTLE_MS: u64 = 250;
 const MEASURE_MS: u64 = 1_500;
@@ -198,7 +202,7 @@ async fn audio_loop(audio: AudioPeripherals<'static>, mut consumer: Consumer<'st
             match mode {
                 MODE_RAW_TRIANGLE => {
                     for frame in output.chunks_exact_mut(2) {
-                        let sample = raw_triangle(triangle_position) * RAW_TRIANGLE_LEVEL;
+                        let sample = raw_sine(triangle_position) * RAW_TONE_LEVEL;
                         let bits = f32_to_u24(sample);
                         frame[0] = bits;
                         frame[1] = bits;
@@ -236,7 +240,7 @@ async fn probe_ui(
     mut led: Output<'static>,
     mut producer: Producer<'static, MixerEvent>,
 ) -> ! {
-    // First press calls next(), so start on the last step. That keeps click 1 on the raw triangle.
+    // First press calls next(), so start on the last step. That keeps click 1 on the raw sine.
     let mut step = ProbeStep::HeavyFourEnginesFourNotes;
 
     loop {
@@ -517,14 +521,10 @@ fn record_result(result: u8) {
     }
 }
 
-fn raw_triangle(position: u32) -> f32 {
-    let position = position % RAW_TRIANGLE_PERIOD_SAMPLES;
-    if position <= RAW_TRIANGLE_PERIOD_SAMPLES / 2 {
-        position as f32 * 4.0 / RAW_TRIANGLE_PERIOD_SAMPLES as f32 - 1.0
-    } else {
-        let falling_position = position - RAW_TRIANGLE_PERIOD_SAMPLES / 2;
-        falling_position as f32 * -4.0 / RAW_TRIANGLE_PERIOD_SAMPLES as f32 + 1.0
-    }
+fn raw_sine(position: u32) -> f32 {
+    let wrapped = (position % RAW_TONE_PERIOD_SAMPLES) as f32;
+    let phase = wrapped * (2.0 * core::f32::consts::PI) / RAW_TONE_PERIOD_SAMPLES as f32;
+    sinf(phase)
 }
 
 async fn show_result(led: &mut Output<'static>) -> bool {

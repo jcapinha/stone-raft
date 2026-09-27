@@ -25,6 +25,7 @@ embassy-time = "0.5"
 embedded-graphics = "0.8"
 engine = { path = "../engine" }
 heapless = { version = "0.9", default-features = false }
+libm = "0.2.16"
 panic-probe = { version = "1", features = ["print-defmt"] }
 rand = { version = "0.8", default-features = false, features = ["small_rng"] }
 ssd1306 = "0.10"

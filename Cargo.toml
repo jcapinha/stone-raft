@@ -7,3 +7,8 @@ members = ["engine", "host-common", "host-wsl", "host-windows", "host-daisy"]
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Temporary whine check. Delete this patch and host-daisy/vendor/daisy-embassy
+# after the 16-sample listen. Published daisy-embassy 0.3.0 uses a 32-sample batch.
+[patch.crates-io]
+daisy-embassy = { path = "host-daisy/vendor/daisy-embassy" }

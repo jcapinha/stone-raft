@@ -1,0 +1,32 @@
+[package]
+name = "daisy-embassy"
+version = "0.3.0"
+edition = "2024"
+authors = ["DicklessGreat<dicklessgreat@gmail.com>"]
+description = "async audio development with daisy seed and embassy"
+keywords = ["embassy", "async", "audio", "embedded", "no-std"]
+license = "MIT"
+repository = "https://github.com/daisy-embassy/daisy-embassy"
+categories = ["embedded"]
+
+# Temporary whine-check copy of daisy-embassy 0.3.0.
+# The only intentional change is BLOCK_LENGTH in src/audio.rs (32 -> 16).
+# Delete this directory and the [patch.crates-io] entry after that listen.
+
+[dependencies]
+embassy-stm32 = { version = "0.6.0", features = ["defmt", "stm32h750ib", "time-driver-tim5", "exti", "memory-x", "unstable-pac", "chrono"] }
+embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime", "tick-hz-32_768", "generic-queue-8"] }
+embassy-sync = { version = "0.8.0", features = ["defmt"] }
+cortex-m = "0.7.7"
+static_cell = "2.1.1"
+defmt = "1.0.1"
+grounded = "0.2.0"
+wm8731 = "0.1.0"
+stm32-fmc = "0.4.0"
+
+[features]
+seed = []
+seed_1_1 = []
+seed_1_2 = []
+seed3 = []
+patch_sm = []

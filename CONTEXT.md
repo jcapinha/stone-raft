@@ -111,6 +111,10 @@ One 3-way selector (amp, filter env, assignable env) plus four pots for attack, 
 **Pickup**:
 Optional later pot rule: after `random` or an engine switch, turning a knob does nothing until it passes the stored param value, then it follows. Not required. Encoders do not need this.
 
+**Callback noise**:
+A steady whine at the rate the codec hands the program a new batch of samples (sample rate divided by batch size), plus quieter copies at whole-number multiples of that rate. With a 32-sample batch at 48 kHz, that rate is 1500 Hz.
+_Avoid_: assuming the classic 1 kHz figure, which is the same whine with a 48-sample batch
+
 ## Decisions
 
 **Rust as the implementation language**
@@ -198,6 +202,9 @@ If there is exactly one output device or one MIDI input port, the host uses it a
 
 **Personal WSL play launcher**
 A gitignored `play` file at the repo root. From WSL, `./play` opens a new Windows PowerShell 5.1 window and returns immediately. That window uses the documented Windows play recipe (`CARGO_TARGET_DIR` on the Windows drive, `CARGO_INCREMENTAL=0`, `cargo run -p host-windows`) and stays open after the host exits. The Windows `cd` path is hard-coded to `\\wsl$\Ubuntu\home\capinha\audio_experiments\stone-raft`. Not a committed project tool.
+
+**Whine debug order**
+Confirmed callback noise on a powerbank, breadboard untouched. A 240 Hz sine showed thin lines at about 1500 Hz and 3000 Hz on a 32-sample batch, then 3000 Hz and 6000 Hz on a 16-sample batch. Silence has no audible tone. The tree still has that temporary sine and a 16-sample daisy-embassy patch. Neither is the fix. Full record: `host-daisy/WHINE_HANDOFF.md`. Do not change the batch, restore the triangle, or move wires until the author picks a direction there.
 
 **Front panel direction (planning, not firmware)**
 One control strip. Engine 1–4 selects which instance the pots edit; other engines can stay enabled. Layout from the cardboard mockup: VOICE (pick, LEVEL, ON) with LFO under it; OSC (saw, square, triangle, sine, then sub and pulse width); FILTER (cutoff, res, EG AMT) to the right of osc; ENVELOPE under osc+filter, starting under sine, as its own section. Hold-to-random, ENV LINK, optional status OLED on the right. No second lane. No shared MASTER pot. Pickup after `random` or engine switch is optional later. Status need is dest / on / listen channel, not a Minilogue-class scope. Mockup: `canvases/synth-front-panel.canvas.tsx` in the Cursor project folder.

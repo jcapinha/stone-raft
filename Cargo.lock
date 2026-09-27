@@ -359,8 +359,6 @@ dependencies = [
 [[package]]
 name = "daisy-embassy"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a3e69a1edbf0b85ee38f1ea6fe96616378bea61b728ca45241026c100afbe02"
 dependencies = [
  "cortex-m",
  "defmt 1.1.1",
@@ -1014,6 +1012,7 @@ dependencies = [
  "embedded-graphics",
  "engine",
  "heapless",
+ "libm",
  "panic-probe",
  "rand",
  "ssd1306",
