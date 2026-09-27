@@ -1,14 +1,21 @@
 //! Fixed voice ownership, allocation, and subtractive sample rendering.
 //!
-//! Pitch, cutoff, resonance, pulse width, filter and assignable envelopes, and
-//! LFO levels are refreshed once per 32-sample block. That matches the Daisy
-//! callback. Waveform generation and the amplitude envelope still run at 48 kHz.
-//! Saw, square, triangle, and sine share one phase. The sub sine keeps its own.
+//! Each voice renders a block of samples in one loop. Phase, filter state, and
+//! the amp envelope stay in locals and are stored at the end. Pitch, cutoff,
+//! resonance, pulse width, the filter and assignable envelopes, and LFO levels
+//! still refresh on a 32-sample counter. That counter is not lined up with the
+//! audio callback, so a refresh can land in the middle of a block. Saw, square,
+//! triangle, and sine share one phase. The sub sine keeps its own. Level 0
+//! skips that wave.
 
-use crate::envelope::velocity_to_amp;
-use crate::filter::Svf;
+use crate::envelope::{step_amp, velocity_to_amp};
+use crate::filter::{Svf, step_svf};
 use crate::lfo::Lfo;
-use crate::oscillator::{Oscillator, PULSE_WIDTH_MAX, PULSE_WIDTH_MIN, Waveform};
+use crate::oscillator::{
+    Oscillator, PULSE_WIDTH_MAX, PULSE_WIDTH_MIN, Waveform, saw_sample, square_sample, step_phase,
+    triangle_sample,
+};
+use crate::sine::sine_from_phase;
 use crate::{AssignableDest, EngineParams, VOICE_COUNT, hz_times_octaves, midi_note_to_hz};
 
 #[derive(Clone, Copy, Default)]
@@ -35,10 +42,21 @@ fn add_assignable(offsets: &mut ModOffsets, dest: AssignableDest, level: f32, am
 
 /// Conservative per-voice gain so a few bright voices stay near full scale.
 const VOICE_AMPLITUDE: f32 = 0.12;
-/// Slow controls stay fixed for one Daisy callback, then move again.
-const CONTROL_BLOCK_SAMPLES: usize = 32;
+/// Slow controls stay fixed for this many samples, then move again.
+/// This is not lined up with the audio callback.
+pub(crate) const CONTROL_BLOCK_SAMPLES: usize = 32;
 
-#[derive(Default)]
+struct WaveControls {
+    phase_inc: f32,
+    sub_inc: f32,
+    pulse_width: f32,
+    a1: f32,
+    a2: f32,
+    a3: f32,
+    mix: HeldControl,
+}
+
+#[derive(Clone, Copy, Default)]
 struct HeldControl {
     saw_gain: f32,
     square_gain: f32,
@@ -134,42 +152,80 @@ impl Voice {
         self.assignable_env.force_idle();
     }
 
-    #[inline]
-    fn render_sample(
+    /// Adds this voice into `output`. Phase, filter memories, and the amp envelope
+    /// stay in locals for the whole slice. `lfo_levels[i]` is the shared LFO pair
+    /// for output sample `i`.
+    fn accumulate(
         &mut self,
         sample_rate_hz: f32,
         params: &EngineParams,
-        lfo_levels: &[f32; 2],
-    ) -> f32 {
+        lfo_levels: &[[f32; 2]],
+        output: &mut [f32],
+    ) {
         if !self.is_active() {
-            return 0.0;
+            return;
         }
-        if self.samples_until_control == 0 {
-            self.update_control(sample_rate_hz, params, lfo_levels);
-            self.samples_until_control = CONTROL_BLOCK_SAMPLES as u8;
-        }
-        self.samples_until_control -= 1;
 
-        let mut mix = 0.0;
-        if self.control.saw_gain > 0.0 {
-            mix += self.control.saw_gain * self.at_pitch.sample_saw();
+        let mut phase = self.at_pitch.phase();
+        let mut sub_phase = self.sub.phase();
+        let (mut ic1, mut ic2) = self.filter.integrators();
+        let mut amp = self.amp.run_state();
+        let mut until = self.samples_until_control;
+        let mut wave = self.wave_controls();
+
+        for (index, sample) in output.iter_mut().enumerate() {
+            if amp.is_idle() {
+                break;
+            }
+            if until == 0 {
+                self.update_control(sample_rate_hz, params, &lfo_levels[index]);
+                wave = self.wave_controls();
+                until = CONTROL_BLOCK_SAMPLES as u8;
+            }
+            until -= 1;
+
+            let mut mix = 0.0;
+            if wave.mix.saw_gain > 0.0 {
+                mix += wave.mix.saw_gain * saw_sample(phase, wave.phase_inc);
+            }
+            if wave.mix.square_gain > 0.0 {
+                mix +=
+                    wave.mix.square_gain * square_sample(phase, wave.phase_inc, wave.pulse_width);
+            }
+            if wave.mix.triangle_gain > 0.0 {
+                mix += wave.mix.triangle_gain * triangle_sample(phase, wave.phase_inc);
+            }
+            if wave.mix.sine_gain > 0.0 {
+                mix += wave.mix.sine_gain * sine_from_phase(phase);
+            }
+            phase = step_phase(phase, wave.phase_inc);
+            if wave.mix.sub_gain > 0.0 {
+                mix += wave.mix.sub_gain * sine_from_phase(sub_phase);
+                sub_phase = step_phase(sub_phase, wave.sub_inc);
+            }
+            let filtered = step_svf(&mut ic1, &mut ic2, wave.a1, wave.a2, wave.a3, mix);
+            let level = step_amp(&mut amp);
+            *sample += filtered * level * wave.mix.output_gain;
         }
-        if self.control.square_gain > 0.0 {
-            mix += self.control.square_gain * self.at_pitch.sample_square();
+
+        self.at_pitch.set_phase(phase);
+        self.sub.set_phase(sub_phase);
+        self.filter.set_integrators(ic1, ic2);
+        self.amp.set_run_state(amp);
+        self.samples_until_control = until;
+    }
+
+    fn wave_controls(&self) -> WaveControls {
+        let (a1, a2, a3) = self.filter.coefficients();
+        WaveControls {
+            phase_inc: self.at_pitch.phase_increment(),
+            sub_inc: self.sub.phase_increment(),
+            pulse_width: self.at_pitch.pulse_width(),
+            a1,
+            a2,
+            a3,
+            mix: self.control,
         }
-        if self.control.triangle_gain > 0.0 {
-            mix += self.control.triangle_gain * self.at_pitch.sample_triangle();
-        }
-        if self.control.sine_gain > 0.0 {
-            mix += self.control.sine_gain * self.at_pitch.sample_sine();
-        }
-        self.at_pitch.advance_phase();
-        if self.control.sub_gain > 0.0 {
-            mix += self.control.sub_gain * self.sub.next_sine();
-        }
-        let filtered = self.filter.tick(mix);
-        let amp = self.amp.next_level();
-        filtered * amp * self.control.output_gain
     }
 
     fn update_control(
@@ -307,15 +363,30 @@ impl Voices {
         }
     }
 
-    #[inline]
+    #[cfg(test)]
     pub(crate) fn render_sample(&mut self, params: &EngineParams) -> f32 {
-        self.tick_lfos(params);
-        let levels = self.lfo_levels;
+        let mut sample = [0.0];
+        self.add_dry(params, &mut sample);
+        sample[0]
+    }
+
+    /// Adds the summed voices into `output`, one entry per sample.
+    ///
+    /// The slice is at most one control block long. Callers that need more
+    /// split it first. Each active voice runs that slice in one inner loop.
+    pub(crate) fn add_dry(&mut self, params: &EngineParams, output: &mut [f32]) {
+        debug_assert!(output.len() <= CONTROL_BLOCK_SAMPLES);
+        let mut lfo_levels = [[0.0f32; 2]; CONTROL_BLOCK_SAMPLES];
+        let count = output.len();
+        for levels in lfo_levels.iter_mut().take(count) {
+            self.tick_lfos(params);
+            *levels = self.lfo_levels;
+        }
+        let lfo_levels = &lfo_levels[..count];
         let sample_rate_hz = self.sample_rate_hz;
-        self.voices
-            .iter_mut()
-            .map(|voice| voice.render_sample(sample_rate_hz, params, &levels))
-            .sum()
+        for voice in &mut self.voices {
+            voice.accumulate(sample_rate_hz, params, lfo_levels, output);
+        }
     }
 
     /// Both LFOs step once per 32-sample block, including while no note is held.

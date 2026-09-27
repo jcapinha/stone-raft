@@ -21,7 +21,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use cortex_m::peripheral::{CPUID, DWT, MPU, Peripherals, SCB};
-use daisy_embassy::audio::AudioPeripherals;
+use daisy_embassy::audio::{AudioPeripherals, BLOCK_LENGTH};
 use daisy_embassy::hal::gpio::{Input, Level, Output, Pull, Speed};
 use daisy_embassy::{hal, new_daisy_board};
 use embassy_executor::Spawner;
@@ -202,8 +202,10 @@ async fn audio_loop(audio: AudioPeripherals<'static>, mut consumer: Consumer<'st
                     }
                 }
                 MODE_DEFAULT_ENGINE | MODE_HEAVY_ENGINE => {
-                    for frame in output.chunks_exact_mut(2) {
-                        let bits = f32_to_u24(mixer.next_sample());
+                    let mut mono = [0.0f32; BLOCK_LENGTH];
+                    mixer.render_block(&mut mono);
+                    for (frame, sample) in output.chunks_exact_mut(2).zip(mono) {
+                        let bits = f32_to_u24(sample);
                         frame[0] = bits;
                         frame[1] = bits;
                     }

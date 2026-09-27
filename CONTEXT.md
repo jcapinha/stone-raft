@@ -157,6 +157,9 @@ Each engine has a fixed set of 4 voices. Measured on `audio-probe` with the inst
 **Seed load experiment**
 This branch measures two `audio-probe` flashes. Flash 1 wraps oscillator phase with a compare and subtract, shares one phase across the four at-pitch waves (sub keeps its own, level 0 still skips that wave), and advances the filter and assignable envelopes one closed-form step per 32-sample block. The amp envelope stays per sample. The mixer already lives in DTCM, so it is not moved. Flash 2 keeps the instruction cache on, turns the data cache on, and leaves the codec DMA buffers in RAM_D2 uncached. Sixteen heavy voices are a measurement, not a pass mark. Flash 2 touches `audio-probe` only until that listen is clean.
 
+**Voice block render and quadrant sine**
+One voice renders the callback's samples in an inner loop. Phase, the filter's two memories, and the amp envelope stay in local variables until the end of that run. The per-voice control counter is not lined up with the callback, so a frequency and filter update can still land in the middle; level 0 still skips that wave, and the sub keeps its own phase. The sine table interpolates only the quarter-cycle the phase is in. Asking for one sample uses the same loop. Sixteen heavy voices remain a measurement, not a pass mark.
+
 **Per-engine output calibration**
 Each engine applies a fixed 1.75 output multiplier after summing its voices. `vol` remains per-engine from 0 through 1; `vol 1` is that synth's calibrated full output. The uniform calibration preserves oscillator mix, sub level, envelopes, filter response, velocity, and modulation. The mixer does not automatically normalize combined engines.
 

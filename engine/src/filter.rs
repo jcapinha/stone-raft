@@ -70,16 +70,50 @@ impl Svf {
         }
     }
 
+    pub(crate) fn integrators(&self) -> (f32, f32) {
+        (self.ic1eq, self.ic2eq)
+    }
+
+    pub(crate) fn set_integrators(&mut self, ic1eq: f32, ic2eq: f32) {
+        self.ic1eq = ic1eq;
+        self.ic2eq = ic2eq;
+    }
+
+    pub(crate) fn coefficients(&self) -> (f32, f32, f32) {
+        (self.a1, self.a2, self.a3)
+    }
+
     /// Filters one sample with the coefficients from the last update.
     #[inline(always)]
     pub(crate) fn tick(&mut self, input: f32) -> f32 {
-        let v3 = input - self.ic2eq;
-        let v1 = self.a1 * self.ic1eq + self.a2 * v3;
-        let v2 = self.ic2eq + self.a2 * self.ic1eq + self.a3 * v3;
-        self.ic1eq = 2.0 * v1 - self.ic1eq;
-        self.ic2eq = 2.0 * v2 - self.ic2eq;
-        v2
+        step_svf(
+            &mut self.ic1eq,
+            &mut self.ic2eq,
+            self.a1,
+            self.a2,
+            self.a3,
+            input,
+        )
     }
+}
+
+/// One lowpass step. Same equation as [`Svf::tick`], with the two memories passed in
+/// so a voice can keep them in locals across a block.
+#[inline(always)]
+pub(crate) fn step_svf(
+    ic1eq: &mut f32,
+    ic2eq: &mut f32,
+    a1: f32,
+    a2: f32,
+    a3: f32,
+    input: f32,
+) -> f32 {
+    let v3 = input - *ic2eq;
+    let v1 = a1 * *ic1eq + a2 * v3;
+    let v2 = *ic2eq + a2 * *ic1eq + a3 * v3;
+    *ic1eq = 2.0 * v1 - *ic1eq;
+    *ic2eq = 2.0 * v2 - *ic2eq;
+    v2
 }
 
 impl Default for Svf {

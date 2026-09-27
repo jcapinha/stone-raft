@@ -151,21 +151,31 @@ impl Mixer {
     /// Mixes enabled instances only. Disabled instances do not run engine DSP.
     #[inline]
     pub fn next_sample(&mut self) -> f32 {
-        let mut mix = 0.0;
+        let mut sample = [0.0];
+        self.render_block(&mut sample);
+        sample[0]
+    }
+
+    /// Fills `output` with one mono sample per entry.
+    ///
+    /// Same samples as calling [`Self::next_sample`] once per entry. Each active
+    /// voice renders the slice in one inner loop.
+    pub fn render_block(&mut self, output: &mut [f32]) {
+        output.fill(0.0);
         for instance in self.instances.iter_mut() {
             if !instance.enabled {
                 continue;
             }
-            mix += instance.engine.next_sample() * instance.volume;
+            let volume = instance.volume;
+            instance.engine.add_block(output, volume);
         }
-        mix
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AdsrTimes, EnvelopeId};
+    use crate::{AdsrTimes, AssignableDest, ControlEvent, EnvelopeId, LfoId, LfoWave};
 
     const SAMPLE_RATE_HZ: f32 = 48_000.0;
     const NOTE: u8 = 60;
@@ -450,5 +460,139 @@ mod tests {
         assert_eq!(MixerEvent::from_midi_bytes(&[0x94]), None);
         assert_eq!(MixerEvent::from_midi_bytes(&[]), None);
         assert_eq!(MixerEvent::from_midi_bytes(&[0xB0, 7, 100]), None);
+    }
+
+    fn engine_event(instance: u8, event: ControlEvent) -> MixerEvent {
+        MixerEvent::ToInstance {
+            instance,
+            event: InstanceEvent::Engine(event),
+        }
+    }
+
+    /// Heavy patch close to audio-probe: every wave, both LFOs, all three envelopes.
+    fn apply_heavy(mixer: &mut Mixer) {
+        let times = |attack_ms, decay_ms, sustain, release_ms| AdsrTimes {
+            attack_ms,
+            decay_ms,
+            sustain,
+            release_ms,
+        };
+        let events = [
+            ControlEvent::SetSawVol { amount: 1.0 },
+            ControlEvent::SetSquareVol { amount: 1.0 },
+            ControlEvent::SetTriangleVol { amount: 1.0 },
+            ControlEvent::SetSineVol { amount: 1.0 },
+            ControlEvent::SetPulse { width: 0.35 },
+            ControlEvent::SetSubVol { amount: 0.5 },
+            ControlEvent::SetCutoff { hz: 600.0 },
+            ControlEvent::SetResonance { amount: 0.65 },
+            ControlEvent::SetEnvelope {
+                which: EnvelopeId::Amp,
+                times: times(5.0, 120.0, 0.8, 300.0),
+            },
+            ControlEvent::SetEnvelope {
+                which: EnvelopeId::Filter,
+                times: times(50.0, 1_500.0, 0.25, 500.0),
+            },
+            ControlEvent::SetFilterEnvAmount { amount: 4.0 },
+            ControlEvent::SetEnvelope {
+                which: EnvelopeId::Assignable,
+                times: times(500.0, 5_000.0, 0.4, 500.0),
+            },
+            ControlEvent::SetAssignableDest {
+                dest: AssignableDest::Resonance,
+            },
+            ControlEvent::SetAssignableAmount { amount: 0.5 },
+            ControlEvent::SetLfoDest {
+                which: LfoId::One,
+                dest: AssignableDest::Cutoff,
+            },
+            ControlEvent::SetLfoAmount {
+                which: LfoId::One,
+                amount: 1.5,
+            },
+            ControlEvent::SetLfoRate {
+                which: LfoId::One,
+                rate_hz: 1.3,
+            },
+            ControlEvent::SetLfoWave {
+                which: LfoId::One,
+                wave: LfoWave::Sine,
+            },
+            ControlEvent::SetLfoRetrig {
+                which: LfoId::One,
+                on: true,
+            },
+            ControlEvent::SetLfoDest {
+                which: LfoId::Two,
+                dest: AssignableDest::Pitch,
+            },
+            ControlEvent::SetLfoAmount {
+                which: LfoId::Two,
+                amount: 0.08,
+            },
+            ControlEvent::SetLfoRate {
+                which: LfoId::Two,
+                rate_hz: 0.7,
+            },
+            ControlEvent::SetLfoWave {
+                which: LfoId::Two,
+                wave: LfoWave::Sine,
+            },
+            ControlEvent::SetLfoRetrig {
+                which: LfoId::Two,
+                on: true,
+            },
+        ];
+        for event in events {
+            mixer.apply(engine_event(1, event));
+        }
+        mixer.apply(volume(1, 0.7));
+    }
+
+    fn note_on(note: u8) -> MixerEvent {
+        MixerEvent::MidiNoteOn {
+            channel: 1,
+            note,
+            velocity: 100,
+        }
+    }
+
+    /// Notes start at different times, so each voice's control counter sits at a
+    /// different point inside the next 32 samples.
+    fn prime_staggered(mixer: &mut Mixer) {
+        apply_heavy(mixer);
+        mixer.apply(note_on(48));
+        for _ in 0..7 {
+            mixer.next_sample();
+        }
+        mixer.apply(note_on(55));
+        for _ in 0..13 {
+            mixer.next_sample();
+        }
+    }
+
+    #[test]
+    fn block_render_matches_sample_path() {
+        let mut block_mixer = Mixer::new(SAMPLE_RATE_HZ);
+        let mut sample_mixer = Mixer::new(SAMPLE_RATE_HZ);
+        prime_staggered(&mut block_mixer);
+        prime_staggered(&mut sample_mixer);
+
+        for block_index in 0..2 {
+            let mut block = [0.0f32; 32];
+            block_mixer.render_block(&mut block);
+            for (index, got) in block.iter().copied().enumerate() {
+                let expected = sample_mixer.next_sample();
+                assert!(
+                    got == expected,
+                    "block {block_index} sample {index}: block {got} sample-path {expected}"
+                );
+            }
+            assert!(
+                block.iter().any(|sample| sample.abs() > 1.0e-4),
+                "block {block_index} should still be sounding"
+            );
+        }
     }
 }
