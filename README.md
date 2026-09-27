@@ -8,7 +8,7 @@ A portable Daisy Seed 3 synthesizer written in Rust as a personal first Rust pro
 - `[host-common/](host-common)`: shared laptop audio, MIDI, commands, and keyboard input
 - `[host-wsl/](host-wsl)`: WSL/Linux host for development and optional listening
 - `[host-windows/](host-windows)`: native Windows host for reliable audio, MIDI, and key release
-- `[host-daisy/](host-daisy)`: Seed 3 firmware and hardware diagnostics using daisy-embassy
+- [`host-daisy/`](host-daisy): Seed 3 firmware (`double-blink`, `audio-probe`, `breadboard-led`, `bench-play`). Builds against crates.io `daisy-embassy` 0.3 with `seed3`. `host-daisy/vendor/` is not what Cargo compiles.
 
 
 
@@ -187,14 +187,27 @@ Confirm the double blink after flashing the firmware. If necessary, press RESET,
 
 ## Daisy audio probe
 
-`audio-probe` separates codec/SAI transport problems from synth engine load. It uses the D15 button, D24 LED, and the normal audio outputs. It does not initialize the OLED. The instruction cache is on and the data cache is on. The codec DMA buffers in RAM_D2 are marked non-cacheable. The shared sine table is copied into fast RAM at startup. The heavy patch and LFO retrig on are unchanged. On 2026-09-25, clicks 1 through 6 (one engine, volume 0.7, up to four heavy notes) were one blink. On 2026-09-26, click 7 (two engines, one note each) was one blink, and click 8 (four engines, one note each) was two blinks. Click 9 (two engines, four heavy notes each) stopped the audio callback immediately, including after a pause between each patch and its notes. Clicks 10 and 11 have not been measured yet. Those blink counts are the baseline from before this experiment. Flash 1 (2026-09-26), data cache still off: click 9 was two blinks. Click 10 started, then the audio callback stopped and the LED blinked continuously. Flash 2 (2026-09-26), data cache on: click 10 was two blinks and audio kept coming out. Click 11 started blinking. Block-render flash (2026-09-27): click 10 was still two blinks and audio kept coming out. The 16-voice step, then click 11, blinked continuously. That step is now click 12. Click-11 flash (2026-09-27): click 10 was two blinks, click 11 (13 heavy voices) was three blinks and audio kept coming out, click 12 (16 heavy voices) blinked continuously.
+`audio-probe` separates codec/SAI transport problems from synth engine load. Same TRRS jack, D15 button, and D24 LED as `breadboard-led`. It never talks to the OLED. Instruction cache on, data cache on, codec DMA in RAM_D2 left uncached. The shared sine table is copied into fast RAM at startup. The heavy patch turns both LFO retrigs **on** (engine default is off).
 
-After the long boot flash, button presses select raw triangle, default saw, then the deterministic heavy patch with one, two, three, and four held voices on engine 1 (volume 0.7). Click 7 is that patch on two engines, one note each, at volume 0.35. Click 8 is four engines, one note each, at volume 0.25. Clicks 9 and 10 hold all four voices on two, then three engines. Click 11 leaves those three engines up and adds engine 4 with the same heavy patch and one note (B3), at the same volume, 0.7/3. Click 12 holds all four voices on all four engines. Clicks 9, 10, and 12 use volume 0.7 divided by the engine count, so the mix stays near click 6. Every full chord is C3, E3, G3, and B3. Each extra engine is loaded on its own, with a short pause so the control queue can drain. Engines keep listen channels 1 through 4, so each chord stays on one engine. The sequence repeats after click 12. About two seconds after each press, the LED reports the peak callback load:
+After the long boot flash, each press advances one step, then repeats:
 
-- One blink: under 50% of the 32-frame callback budget.
-- Two blinks: 50-75%.
+1. Raw triangle (engine bypassed).
+2. Default saw, one held note, volume 0.7.
+3–6. Deterministic heavy patch on engine 1, one then two, three, four held notes, volume 0.7.
+7. Same heavy patch on two engines, one note each, volume 0.35.
+8. Four engines, one note each, volume 0.25.
+9–10. All four voices on two engines, then three engines. Volume 0.7 divided by engine count.
+11. Engines 1–3 stay at four notes each; engine 4 adds one note (B3). Volume 0.7/3. Thirteen heavy voices.
+12. All four engines, four voices each. Volume 0.7/4. Sixteen heavy voices.
+
+Full chords are C3, E3, G3, B3. Extra engines load one at a time with a short pause so the queue can drain. Listen channels stay 1 through 4. About two seconds after each press, the LED reports peak 32-frame callback cost:
+
+- One blink: under 50%.
+- Two blinks: 50–75%.
 - Three blinks: 75% or more.
-- Continuous rapid blink: audio stopped after an interface error; reset the board.
+- Continuous rapid blink: audio interface failed; reset the board.
+
+Last listen (2026-09-27, this sequence, data cache on): click 10 two blinks, click 11 three blinks with audio still coming out, click 12 continuous blink (callback stopped).
 
 PowerShell, from the WSL-backed repository:
 
@@ -218,11 +231,11 @@ Before either flash command, hold BOOT, press and release RESET, then release BO
 
 ## Daisy breadboard play
 
-`breadboard-led` runs the synth engine through the Seed 3 codec, plus a 0.96" I2C OLED and the breadboard button/LED. The instruction cache is on and the data cache stays off. Boot flashes the LED three times. OLED uses blocking I2C at 400 kHz with a 200 ms timeout so a missing screen cannot freeze the button. Hello is drawn, stays for 3 seconds, then the screen sleeps, all before audio starts. After that the Seed does not talk to the OLED. Audio uses the daisy-embassy Seed 3 callback. First button press plays C4, E4, G4 (1 s gate, 2 s rest) at volume 1.0. Later presses apply `random`, then replay, still at volume 1.0. The LED follows each 1 s gate. A continuous rapid blink means audio stopped after an interface error and the board needs a reset.
+`breadboard-led` runs the synth engine through the Seed 3 codec, plus a 0.96" I2C OLED and the breadboard button/LED. Instruction cache on, data cache **off** (unlike `audio-probe`). Boot flashes the LED three times. OLED uses blocking I2C at 400 kHz with a 200 ms timeout so a missing screen cannot freeze the button. Hello is drawn, stays for 3 seconds, then the screen sleeps, all before audio starts. After that the Seed does not talk to the OLED. Audio uses the daisy-embassy Seed 3 callback. First button press plays C4, E4, G4 (1 s gate, 2 s rest) at volume 1.0. Later presses apply `random`, then replay, still at volume 1.0. The LED follows each 1 s gate. A continuous rapid blink means audio stopped after an interface error and the board needs a reset.
 
 Audio is line-level on Audio Out 1 and 2 (pins 18 and 19) and AGND (pin 20). Firmware copies the mono mix to both codec channels. A TRRS breakout plus 10 µF caps and 100 Ω resistors can drive headphones. OLED power is 3.3 V digital (pin 38) and GND (pin 40). Do not use analog 3.3 V on pin 21.
 
-Wiring walkthrough for another agent (OLED): [`host-daisy/BREADBOARD_SETUP_PROMPT.md`](host-daisy/BREADBOARD_SETUP_PROMPT.md). Headphones on the TRRS breakout: [`host-daisy/TRRS_BREAKOUT_PROMPT.md`](host-daisy/TRRS_BREAKOUT_PROMPT.md).
+Wiring walkthrough for another agent: [`host-daisy/docs/BREADBOARD_SETUP_PROMPT.md`](host-daisy/docs/BREADBOARD_SETUP_PROMPT.md). Parts, TRRS wiring, and stock: [`host-daisy/BOM.md`](host-daisy/BOM.md).
 
 One-time ARM/`dfu-util` setup is the same as double blink. When the repository is under `\\wsl$\...`, set `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` as shown in the Windows host section before building. Before flashing from WSL, put the Seed into DFU mode and attach the device shown by `usbipd list`.
 
@@ -240,11 +253,55 @@ dfu-util -a 0 -s 0x08000000:leave -D breadboard-led.bin
 
 The generated `.bin` is disposable. Flashing it replaces the current internal program.
 
+## Daisy bench play
+
+`bench-play` is a bench listen path. It does not replace DIN. Audio starts at boot on the same 48 kHz mono headphone path as `breadboard-led` (one mix on both outputs, no OLED, no button arpeggio). D15 and D24 stay unused. Engine 1 listens on MIDI channel 1 at volume 1.0.
+
+Two B10K pots set cutoff and resonance before you play a note. Cutoff is logarithmic, about 20 Hz full left to 16 kHz full right. Resonance is linear, 0 to 1. Wiring: [`host-daisy/docs/filter-pots.md`](host-daisy/docs/filter-pots.md). Unplug USB-C before wiring.
+
+USB MIDI exists only while `bench-play` is running. The device name is `stone-raft`. The same USB-C cable still powers the board. To flash again, hold BOOT and reset so DFU comes back. `breadboard-led` and `audio-probe` are unchanged.
+
+One-time ARM/`dfu-util` setup is the same as double blink. When the repository is under `\\wsl$\...`, set `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` as shown in the Windows host section before building. Before flashing from WSL, put the Seed into DFU mode and attach the device shown by `usbipd list`.
+
+PowerShell:
+
+```powershell
+$env:CARGO_TARGET_DIR = "$env:USERPROFILE\stone-raft-target"
+$env:CARGO_INCREMENTAL = "0"
+cargo build -p host-daisy --bin bench-play --target thumbv7em-none-eabihf --release
+cargo objcopy -p host-daisy --bin bench-play --target thumbv7em-none-eabihf --release -- -O binary bench-play.bin
+dfu-util -a 0 -s 0x08000000:leave -D bench-play.bin
+```
+
+WSL:
+
+```bash
+cargo build -p host-daisy --bin bench-play --target thumbv7em-none-eabihf --release
+cargo objcopy -p host-daisy --bin bench-play --target thumbv7em-none-eabihf --release -- -O binary bench-play.bin
+dfu-util -a 0 -s 0x08000000:leave -D bench-play.bin
+```
+
+Before either flash command, hold BOOT, press and release RESET, then release BOOT. Always use `--release`.
+
+### midi-forward
+
+`midi-forward` runs on Windows only. Do not run it under WSL. It copies note on/off from a keyboard to the MIDI port whose name contains `stone-raft`. One input port is selected automatically. Several inputs produce a numbered list. If `stone-raft` is missing, it prints the output ports and exits. Set the keyboard to MIDI channel 1. Press Ctrl+C to quit. Notes it still considers held get a note-off.
+
+PowerShell, after `bench-play` is running (the USB MIDI device is on the Windows side, not inside WSL):
+
+```powershell
+$env:CARGO_TARGET_DIR = "$env:USERPROFILE\stone-raft-target"
+$env:CARGO_INCREMENTAL = "0"
+cargo run -p host-windows --bin midi-forward
+```
+
+From WSL, flash with the commands above, then run `midi-forward` in PowerShell. There is no WSL build of the forwarder to use.
+
 ## Tests
 
-Same command in WSL or PowerShell:
+Same command in WSL or PowerShell. `host-daisy` here is the knob math on the laptop, not the Seed firmware.
 
 ```text
-cargo test -p engine -p host-common
+cargo test -p engine -p host-common -p host-daisy
 ```
 

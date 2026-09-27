@@ -1,19 +1,18 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
 
 //! Permanent Seed 3 audio isolation probe. It uses D15 for the button, D24 for
 //! status, and the normal codec outputs. It never initializes the OLED.
 //!
-//! Each button press advances through:
-//! 1. Raw triangle, with the synth engine bypassed.
-//! 2. The default one-saw engine patch with one held note.
-//! 3. A deterministic heavy patch with one held note.
-//! 4. The same heavy patch with two, three, then four held notes, all on engine 1.
-//! 5. The same heavy patch on two engines, one note each.
-//! 6. The same heavy patch on four engines, one note each.
-//! 7. The same heavy patch on two, then three engines, with all four voices held on each.
-//! 8. Engine 4 joins that patch with one note. Engines 1–3 stay as they were.
-//! 9. All four engines with all four voices held. Then the sequence repeats.
+//! Each button press advances through 12 steps, then repeats (same order as README):
+//! 1. Raw triangle, engine bypassed.
+//! 2. Default one-saw patch, one held note.
+//! 3–6. Heavy patch on engine 1 with one, then two, three, four held notes.
+//! 7. Heavy patch on two engines, one note each.
+//! 8. Four engines, one note each.
+//! 9–10. Two, then three engines, all four voices held on each.
+//! 11. Engine 4 joins with one note. Engines 1–3 stay at four notes.
+//! 12. All four engines, all four voices held.
 //!
 //! After a short settling period, the LED reports the peak 32-frame callback
 //! cost: one blink is under 50% of the available cycles, two is 50-75%, and
@@ -149,8 +148,12 @@ fn enable_dcache_with_uncached_ram_d2(mpu: &mut MPU, scb: &mut SCB, cpuid: &mut 
     scb.enable_dcache(cpuid);
 }
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+#[cfg(not(target_os = "none"))]
+fn main() {}
+
+#[cfg_attr(target_os = "none", embassy_executor::main)]
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+async fn run(spawner: Spawner) {
     let p = hal::init(daisy_embassy::default_rcc());
     let board = new_daisy_board!(p);
 

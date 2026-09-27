@@ -15,20 +15,27 @@ daisy-embassy = { version = "0.3", features = ["seed3"] }
 embassy-stm32 = { version = "0.6.0", features = ["time"] }
 defmt = "1"
 defmt-rtt = "1"
+# `platform-cortex-m` is Seed-only. Enabling it here makes rust-analyzer try to
+# assemble the ARM `sev` instruction while it checks this crate on the laptop.
 embassy-executor = { version = "0.10", features = [
     "defmt",
     "executor-thread",
     "executor-interrupt",
-    "platform-cortex-m",
 ] }
+embassy-futures = "0.1.2"
 embassy-time = "0.5"
+embassy-usb = { version = "0.6.0", features = ["defmt"] }
 embedded-graphics = "0.8"
 engine = { path = "../engine" }
 heapless = { version = "0.9", default-features = false }
+libm = "0.2.16"
 panic-probe = { version = "1", features = ["print-defmt"] }
 rand = { version = "0.8", default-features = false, features = ["small_rng"] }
 ssd1306 = "0.10"
 static_cell = "2"
+
+[target.thumbv7em-none-eabihf.dependencies]
+embassy-executor = { version = "0.10", features = ["platform-cortex-m"] }
 
 [[bin]]
 name = "double-blink"
@@ -45,5 +52,11 @@ bench = false
 [[bin]]
 name = "audio-probe"
 path = "src/bin/audio_probe.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "bench-play"
+path = "src/bin/bench_play.rs"
 test = false
 bench = false

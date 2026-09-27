@@ -1,5 +1,5 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
 
 use daisy_embassy::{hal, new_daisy_board};
 use embassy_executor::Spawner;
@@ -10,8 +10,12 @@ const FLASH_MS: u64 = 100;
 const BETWEEN_FLASHES_MS: u64 = 100;
 const BETWEEN_PAIRS_MS: u64 = 1_700;
 
-#[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+#[cfg(not(target_os = "none"))]
+fn main() {}
+
+#[cfg_attr(target_os = "none", embassy_executor::main)]
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+async fn run(_spawner: Spawner) {
     let peripherals = hal::init(daisy_embassy::default_rcc());
     let board = new_daisy_board!(peripherals);
     let mut led = board.user_led;

@@ -12,9 +12,9 @@ You are helping me wire a Daisy Seed 3 breadboard so firmware `breadboard-led` i
 - Existing button: Seed D15 (physical pin 22) with internal pull-up, other side to GND (pin 40). Pin 21 next to D15 is analog 3V3. The button must not go there.
 - Existing LED: Seed D24 (physical pin 31) through a series resistor 330 Ω to 1 kΩ to the LED, cathode to GND (pin 40). Leave this wired. Firmware uses it as a gate lamp (on only while a note is held).
 - New screen: 0.96" 128x64 OLED, 4-pin I2C, labels GND, VDD, SCK, SDA. SCK is the I2C clock (same as SCL). VDD is 3.3 V. Default address 0x3C. Driver in firmware is SSD1306.
-- TRRS 3.5 mm breakout for headphones (pads TIP, RING1, RING2, SLEEVE), two 10 µF electrolytic caps, two 100 Ω resistors. Line-level into headphones is quiet. This is not a headphone amp. Do not use the TDA2822 speaker board. Step-by-step headphone wiring: `host-daisy/TRRS_BREAKOUT_PROMPT.md`.
+- TRRS 3.5 mm breakout for headphones (pads TIP, RING1, RING2, SLEEVE), two 10 µF electrolytic caps, two 100 Ω resistors. Line-level into headphones is quiet. This is not a headphone amp. Do not use the TDA2822 speaker board. Canonical jack wiring: [`BOM.md`](../BOM.md) (Headphone path).
 
-Repo pinout drawing: `daisy-seed-3-pinout-diagram.png` at the repo root. Firmware comments in `host-daisy/src/bin/breadboard_led.rs` match this table.
+Repo pinout drawing: `daisy-seed-3-pinout-diagram.png` at the repo root. Firmware comments in `host-daisy/src/bin/breadboard_led.rs` match this table. Parts list and on-board tracking: [`host-daisy/BOM.md`](../BOM.md).
 
 ## Pin table (do not skip)
 
@@ -35,11 +35,9 @@ TRRS jack (new). Tie AGND pin 20 to DGND pin 40 first. Cap stripe toward the jac
 - Seed Audio Out 1, physical pin 18 -> 10 µF -> 100 Ω -> TIP
 - Seed Audio Out 2, physical pin 19 -> 10 µF -> 100 Ω -> RING1
 - Seed AGND, physical pin 20 -> RING2
-- SLEEVE unconnected at first; join to AGND if one ear is silent
+- SLEEVE also to AGND pin 20 (on the board now; needed if one ear is silent)
 
 Do not use digital GND pin 40 as the headphone ground if AGND pin 20 is available.
-
-I2C modules usually already have pull-ups. Do not add extra resistors unless the screen never ACKs.
 
 ## Flash (firmware is already written)
 
@@ -84,12 +82,8 @@ No Hello, board otherwise alive:
 
 - Recheck OLED GND, VDD on pin 38, SCK on pin 12, SDA on pin 13. Swap SCK/SDA is a common mistake.
 - Confirm the module is 4-pin I2C, not 7-pin SPI.
-- If the image is present but shifted two pixels, the glass may be SH1106. Tell me that; firmware currently assumes SSD1306.
-
-Hello never appears, no I2C ACK (firmware still plays audio):
-
 - Power and ground first, then clocks. Many modules need 3.3 V, not 5 V.
-- Try 4.7 kΩ pull-ups from SDA and SCL to 3.3 V digital only if the module has none.
+- If the image is present but shifted two pixels, the glass may be SH1106. Tell me that; firmware currently assumes SSD1306.
 
 No sound, Hello works:
 

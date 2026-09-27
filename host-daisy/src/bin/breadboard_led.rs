@@ -1,5 +1,5 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
 
 //! Breadboard synth check. USB powers the Seed.
 //!
@@ -77,8 +77,12 @@ static EVENT_QUEUE: StaticCell<Queue<MixerEvent, EVENT_QUEUE_CAP>> = StaticCell:
 static AUDIO_ERROR: AtomicBool = AtomicBool::new(false);
 static GATE_LED_ON: AtomicBool = AtomicBool::new(false);
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+#[cfg(not(target_os = "none"))]
+fn main() {}
+
+#[cfg_attr(target_os = "none", embassy_executor::main)]
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+async fn run(spawner: Spawner) {
     let p = hal::init(daisy_embassy::default_rcc());
     let board = new_daisy_board!(p);
 
