@@ -6,7 +6,7 @@ Closed doors. Do not re-propose these unless the author explicitly reopens them 
 - **Teensy 4.1 as the hardware** — considered and set aside for the Daisy Seed, which has an onboard audio codec and analog inputs (no external DAC to wire).
 - **Raspberry Pi as the hardware** — not chosen, but kept as an explicit fallback if embedded Rust on the Daisy proves too hard.
 - **FunDSP as an engine dependency** — rejected; it needs std and a heap and will not run on the Daisy. May be used only as a learning reference.
-- **USB MIDI on the Daisy** — not used; serial (DIN/TRS) MIDI chosen. USB MIDI remains fine on the laptop for development.
+- **USB MIDI as the Daisy instrument input** — serial (DIN/TRS) through the optocoupler stays the way the instrument is played. `bench-play` may expose a USB MIDI device named `stone-raft` for the bench, and that device may linger. It is not a second official input. Laptop USB and software MIDI via midir stay fine.
 - **Mutex for audio-callback control signals** — rejected in favor of atomics; the audio thread must never risk blocking on a lock.
 - **Windows-native host via rustup's GNU/MinGW toolchain** — attempted and abandoned (`dlltool` without assembler). Stays closed. Use MSVC Build Tools for `host-windows` instead.
 - **WSL-only listening for laptop play-tests** — reversed. WSLg Pulse/`RDPSink` drops the cpal stream with ALSA `snd_pcm_avail_delay` I/O error (5) even when idle. Native `host-windows` on MSVC is the play path; `host-wsl` remains for WSL work.

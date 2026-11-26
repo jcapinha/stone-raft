@@ -2,6 +2,13 @@
 name = "host-windows"
 version = "0.1.0"
 edition = "2024"
+default-run = "host-windows"
 
 [dependencies]
+ctrlc = "3.4"
 host-common = { path = "../host-common" }
+midir = "0.11"
+
+[[bin]]
+name = "midi-forward"
+path = "src/bin/midi_forward.rs"
